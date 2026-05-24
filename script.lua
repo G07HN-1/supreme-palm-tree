@@ -1,12 +1,24 @@
 --loadstring(game:HttpGet("https://raw.githubusercontent.com/G07HN-1/supreme-palm-tree/refs/heads/main/script.lua"))()
 
-if getgenv().FortuneSeedUI then
-	getgenv().FortuneSeedUI.Stop = true
+local PreviousENV = getgenv().FortuneSeedUI
+
+if PreviousENV then
+	PreviousENV.Stop = true
+
+	if type(PreviousENV.Connections) == "table" then
+		for _, connection in ipairs(PreviousENV.Connections) do
+			pcall(function()
+				connection:Disconnect()
+			end)
+		end
+	end
+
 	task.wait(0.5)
 end
 
 getgenv().FortuneSeedUI = {
 	Stop = false,
+	Connections = {},
 }
 
 local ENV = getgenv().FortuneSeedUI
@@ -14,6 +26,8 @@ local ENV = getgenv().FortuneSeedUI
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local HttpService = game:GetService("HttpService")
+local VirtualUser = game:GetService("VirtualUser")
+local Workspace = game:GetService("Workspace")
 
 local LocalPlayer = Players.LocalPlayer
 
@@ -53,6 +67,7 @@ local State = {
 	AutoBuySelectedEggRarities = false,
 	AutoSell = false,
 	AutoCompost = false,
+	AntiAFK = true,
 
 	SelectedSeedOption = nil,
 	SelectedSeeds = {},
@@ -317,6 +332,7 @@ local function getConfigData()
 		AutoBuySelectedEggRarities = State.AutoBuySelectedEggRarities,
 		AutoSell = State.AutoSell,
 		AutoCompost = State.AutoCompost,
+		AntiAFK = State.AntiAFK,
 		SelectedSeedOption = State.SelectedSeedOption,
 		SelectedSeeds = getSelectedSeedList(),
 		SelectedSeedRarityOption = State.SelectedSeedRarityOption,
@@ -385,6 +401,7 @@ local function loadConfig()
 		"AutoBuySelectedEggRarities",
 		"AutoSell",
 		"AutoCompost",
+		"AntiAFK",
 		"WebhookSeedPurchases",
 		"WebhookExpensiveGear",
 	}) do
@@ -1369,7 +1386,37 @@ local function compostSelectedSeedOnce(quiet)
 	end
 end
 
+local function simulateActivity()
+	local camera = Workspace.CurrentCamera
+
+	if not camera then
+		return
+	end
+
+	VirtualUser:Button2Down(Vector2.zero, camera.CFrame)
+	task.wait(1)
+	VirtualUser:Button2Up(Vector2.zero, camera.CFrame)
+end
+
+local function setupAntiAFK()
+	local connection = LocalPlayer.Idled:Connect(function()
+		if ENV.Stop or not State.AntiAFK then
+			return
+		end
+
+		simulateActivity()
+		consolePrint("[ANTI AFK] Player successfully un-idled.")
+	end)
+
+	table.insert(ENV.Connections, connection)
+
+	if State.AntiAFK then
+		consolePrint("[ANTI AFK] Anti AFK active.")
+	end
+end
+
 loadConfig()
+setupAntiAFK()
 
 --// UI
 
@@ -1925,6 +1972,20 @@ SettingsTab:AddToggle({
 				Time = 4,
 			})
 		end
+	end,
+})
+
+SettingsTab:AddSection({
+	Name = "Player",
+})
+
+SettingsTab:AddToggle({
+	Name = "Anti AFK",
+	Default = State.AntiAFK,
+	Callback = function(value)
+		State.AntiAFK = value
+		saveConfig()
+		consolePrint("[TOGGLE] Anti AFK:", value)
 	end,
 })
 
