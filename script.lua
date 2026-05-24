@@ -27,6 +27,9 @@ local GearTransaction = GearRemote and GearRemote:FindFirstChild("Transaction")
 local EggShopRemote = Remotes:FindFirstChild("EggShop")
 local EggShopTransaction = EggShopRemote and EggShopRemote:FindFirstChild("Transaction")
 local RollEggRemote = Remotes:FindFirstChild("RollEgg")
+local ComposterRemote = Remotes:FindFirstChild("Composter")
+local ComposterInsertSeed = ComposterRemote and ComposterRemote:FindFirstChild("InsertSeed")
+local ComposterPullLever = ComposterRemote and ComposterRemote:FindFirstChild("PullLever")
 
 local Assets = ReplicatedStorage:WaitForChild("Assets")
 local SeedsFolder = Assets:WaitForChild("Seeds")
@@ -49,6 +52,7 @@ local State = {
 	AutoBuyAllEggs = false,
 	AutoBuySelectedEggRarities = false,
 	AutoSell = false,
+	AutoCompost = false,
 
 	SelectedSeedOption = nil,
 	SelectedSeeds = {},
@@ -56,12 +60,14 @@ local State = {
 	SelectedSeedRarities = {},
 	SelectedEggRarityOption = nil,
 	SelectedEggRarities = {},
+	SelectedCompostSeedOption = nil,
 
 	SaveConfigEnabled = false,
 	RollDelay = 1.25,
 	GearDelay = 30,
 	EggDelay = 30,
 	SellDelay = 15,
+	CompostDelay = 5,
 
 	WebhookURL = "",
 	WebhookSeedPurchases = true,
@@ -71,6 +77,7 @@ local State = {
 }
 
 local SeedOptionMap = {}
+local CompostSeedOptionMap = {}
 local GearNamesCache = nil
 local GearPriceCache = {}
 local GearBuyItemDelay = 0.2
@@ -309,16 +316,19 @@ local function getConfigData()
 		AutoBuyAllEggs = State.AutoBuyAllEggs,
 		AutoBuySelectedEggRarities = State.AutoBuySelectedEggRarities,
 		AutoSell = State.AutoSell,
+		AutoCompost = State.AutoCompost,
 		SelectedSeedOption = State.SelectedSeedOption,
 		SelectedSeeds = getSelectedSeedList(),
 		SelectedSeedRarityOption = State.SelectedSeedRarityOption,
 		SelectedSeedRarities = getSelectedSeedRarityList(),
 		SelectedEggRarityOption = State.SelectedEggRarityOption,
 		SelectedEggRarities = getSelectedEggRarityList(),
+		SelectedCompostSeedOption = State.SelectedCompostSeedOption,
 		RollDelay = State.RollDelay,
 		GearDelay = State.GearDelay,
 		EggDelay = State.EggDelay,
 		SellDelay = State.SellDelay,
+		CompostDelay = State.CompostDelay,
 		WebhookURL = State.WebhookURL,
 		WebhookSeedPurchases = State.WebhookSeedPurchases,
 		WebhookExpensiveGear = State.WebhookExpensiveGear,
@@ -374,6 +384,7 @@ local function loadConfig()
 		"AutoBuyAllEggs",
 		"AutoBuySelectedEggRarities",
 		"AutoSell",
+		"AutoCompost",
 		"WebhookSeedPurchases",
 		"WebhookExpensiveGear",
 	}) do
@@ -387,6 +398,7 @@ local function loadConfig()
 		"GearDelay",
 		"EggDelay",
 		"SellDelay",
+		"CompostDelay",
 		"ExpensiveThreshold",
 	}) do
 		if type(data[key]) == "number" then
@@ -408,6 +420,10 @@ local function loadConfig()
 
 	if type(data.SelectedEggRarityOption) == "string" then
 		State.SelectedEggRarityOption = data.SelectedEggRarityOption
+	end
+
+	if type(data.SelectedCompostSeedOption) == "string" then
+		State.SelectedCompostSeedOption = data.SelectedCompostSeedOption
 	end
 
 	if type(data.ExpensiveThresholdOption) == "string" then
@@ -655,6 +671,34 @@ local function getGearNames(forceRefresh)
 	GearNamesCache = names
 
 	return names
+end
+
+local function getComposterRemotes()
+	if ComposterInsertSeed and ComposterPullLever then
+		return ComposterInsertSeed, ComposterPullLever
+	end
+
+	ComposterRemote = ComposterRemote or Remotes:FindFirstChild("Composter") or Remotes:WaitForChild("Composter", 5)
+	ComposterInsertSeed = ComposterRemote
+		and (ComposterRemote:FindFirstChild("InsertSeed") or ComposterRemote:WaitForChild("InsertSeed", 5))
+	ComposterPullLever = ComposterRemote
+		and (ComposterRemote:FindFirstChild("PullLever") or ComposterRemote:WaitForChild("PullLever", 5))
+
+	return ComposterInsertSeed, ComposterPullLever
+end
+
+local function getSelectedCompostSeedName()
+	local selected = State.SelectedCompostSeedOption
+
+	if not selected or selected == "Select Seed" or selected == "No Seeds Found" then
+		return nil
+	end
+
+	return CompostSeedOptionMap[selected] or selected
+end
+
+local function getCompostSeedKey(seedName)
+	return tostring(seedName) .. "_1_Normal"
 end
 
 local function getMyGearStockFolder()
@@ -1156,12 +1200,7 @@ local function buyEggsOnce(buyAll)
 		end
 	end
 
-	consolePrint(
-		"[EGG BUY] Finished egg pass. attempted:",
-		tostring(attempted),
-		"successful calls:",
-		tostring(bought)
-	)
+	consolePrint("[EGG BUY] Finished egg pass. attempted:", tostring(attempted), "successful calls:", tostring(bought))
 
 	return bought
 end
@@ -1273,6 +1312,63 @@ local function sellCrates()
 	end
 end
 
+local function compostSelectedSeedOnce(quiet)
+	local insertSeed, pullLever = getComposterRemotes()
+	local seedName = getSelectedCompostSeedName()
+
+	if not insertSeed or not pullLever then
+		consoleWarn("[COMPOST] Composter remotes not found.")
+		return false
+	end
+
+	if not seedName then
+		if not quiet then
+			OrionLib:MakeNotification({
+				Name = "No Compost Seed",
+				Content = "Pick a seed in the Compost tab first.",
+				Time = 3,
+			})
+		end
+
+		return false
+	end
+
+	local composterId = 3
+	local seedKey = getCompostSeedKey(seedName)
+	local amount = 1
+
+	local insertOk, insertResult = pcall(function()
+		return insertSeed:InvokeServer(composterId, seedKey, amount)
+	end)
+
+	if not insertOk then
+		consoleWarn("[COMPOST INSERT FAILED]", seedKey, insertResult)
+		return false
+	end
+
+	task.wait(0.1)
+
+	local pullOk, pullResult = pcall(function()
+		return pullLever:InvokeServer(composterId)
+	end)
+
+	if pullOk then
+		if not quiet then
+			OrionLib:MakeNotification({
+				Name = "Composted",
+				Content = seedKey .. " was sent to the composter.",
+				Time = 3,
+			})
+		end
+
+		consolePrint("[COMPOST]", seedKey, "insert:", insertResult, "pull:", pullResult)
+		return true
+	else
+		consoleWarn("[COMPOST PULL FAILED]", seedKey, pullResult)
+		return false
+	end
+end
+
 loadConfig()
 
 --// UI
@@ -1295,6 +1391,12 @@ local SeedsTab = Window:MakeTab({
 local EggsTab = Window:MakeTab({
 	Name = "Eggs",
 	Icon = "egg",
+	PremiumOnly = false,
+})
+
+local CompostTab = Window:MakeTab({
+	Name = "Compost",
+	Icon = "recycle",
 	PremiumOnly = false,
 })
 
@@ -1618,6 +1720,128 @@ EggsTab:AddSlider({
 	end,
 })
 
+--// COMPOST TAB
+
+CompostTab:AddSection({
+	Name = "Auto Compost",
+})
+
+local IsRefreshingCompostSeedDropdown = false
+local CompostSeedLabel
+local updateCompostSeedLabel
+
+CompostSeedLabel = CompostTab:AddParagraph("Selected Seed Variant", "None")
+
+function updateCompostSeedLabel()
+	if not CompostSeedLabel then
+		return
+	end
+
+	local seedName = getSelectedCompostSeedName()
+
+	if seedName then
+		CompostSeedLabel:Set(getCompostSeedKey(seedName))
+	else
+		CompostSeedLabel:Set("None")
+	end
+end
+
+local CompostSeedDropdown = CompostTab:AddDropdown({
+	Name = "Seed Dropdown",
+	Default = "Select Seed",
+	Options = {
+		"Select Seed",
+	},
+	Callback = function(value)
+		State.SelectedCompostSeedOption = value
+
+		if IsRefreshingCompostSeedDropdown then
+			return
+		end
+
+		updateCompostSeedLabel()
+		saveConfig()
+
+		local seedName = getSelectedCompostSeedName()
+
+		if seedName then
+			OrionLib:MakeNotification({
+				Name = "Compost Seed Selected",
+				Content = getCompostSeedKey(seedName) .. " will be composted.",
+				Time = 3,
+			})
+		end
+	end,
+})
+
+local function refreshCompostSeedDropdown()
+	local seedNames = getSeedNames()
+	local options = {
+		"Select Seed",
+	}
+	CompostSeedOptionMap = {}
+
+	for _, seedName in ipairs(seedNames) do
+		table.insert(options, seedName)
+		CompostSeedOptionMap[seedName] = seedName
+	end
+
+	if #seedNames == 0 then
+		options = {
+			"No Seeds Found",
+		}
+	end
+
+	IsRefreshingCompostSeedDropdown = true
+	CompostSeedDropdown:Refresh(options, true)
+	pcall(function()
+		if State.SelectedCompostSeedOption and CompostSeedOptionMap[State.SelectedCompostSeedOption] then
+			CompostSeedDropdown:Set(State.SelectedCompostSeedOption)
+		else
+			CompostSeedDropdown:Set("Select Seed")
+		end
+	end)
+	IsRefreshingCompostSeedDropdown = false
+	updateCompostSeedLabel()
+end
+
+CompostTab:AddButton({
+	Name = "Refresh Seed List",
+	Callback = function()
+		refreshCompostSeedDropdown()
+	end,
+})
+
+CompostTab:AddButton({
+	Name = "Compost Selected Once",
+	Callback = function()
+		compostSelectedSeedOnce(false)
+	end,
+})
+
+CompostTab:AddToggle({
+	Name = "Auto Compost Selected Seed",
+	Default = State.AutoCompost,
+	Callback = function(value)
+		State.AutoCompost = value
+		saveConfig()
+		consolePrint("[TOGGLE] Auto Compost:", value)
+	end,
+})
+
+CompostTab:AddSlider({
+	Name = "Compost Loop Delay",
+	Min = 1,
+	Max = 120,
+	Default = State.CompostDelay,
+	Increment = 1,
+	ValueName = "sec",
+	Callback = function(value)
+		State.CompostDelay = value
+		saveConfig()
+	end,
+})
+
 --// AUTO BUY TAB
 
 AutoBuyTab:AddSection({
@@ -1896,6 +2120,17 @@ end)
 
 task.spawn(function()
 	while not ENV.Stop do
+		if State.AutoCompost then
+			compostSelectedSeedOnce(true)
+			task.wait(math.max(1, State.CompostDelay))
+		else
+			task.wait(0.25)
+		end
+	end
+end)
+
+task.spawn(function()
+	while not ENV.Stop do
 		if State.AutoSell then
 			sellCrates()
 			task.wait(math.max(1, State.SellDelay))
@@ -1908,9 +2143,11 @@ end)
 --// INIT
 
 refreshSeedDropdown()
+refreshCompostSeedDropdown()
 updateSelectedSeedsLabel()
 updateSelectedSeedRaritiesLabel()
 updateSelectedEggRaritiesLabel()
+updateCompostSeedLabel()
 
 OrionLib:MakeNotification({
 	Name = "Loaded",
