@@ -37,6 +37,8 @@ local BuySeedRemote = Remotes:WaitForChild("BuySeed")
 local SellCratesRemote = Remotes:WaitForChild("SellCrates")
 local UpgradePlantRemote = Remotes:FindFirstChild("UpgradePlant")
 local RemovePlantRemote = Remotes:FindFirstChild("RemovePlant")
+local UseSprayRemote = Remotes:FindFirstChild("UseSpray")
+local PlantSeedRemote = Remotes:FindFirstChild("PlantSeed")
 
 local GearRemote = Remotes:FindFirstChild("Gear")
 local GearTransaction = GearRemote and GearRemote:FindFirstChild("Transaction")
@@ -70,6 +72,8 @@ local State = {
 	AutoSell = false,
 	AutoCompost = false,
 	AutoUpgradePlants = false,
+	AutoSprayPlants = false,
+	AutoPlantSeeds = false,
 	AntiAFK = true,
 
 	SelectedSeedOption = nil,
@@ -80,6 +84,9 @@ local State = {
 	SelectedEggRarities = {},
 	SelectedCompostSeedOption = nil,
 	SelectedCompostSeeds = {},
+	SelectedSprayOption = nil,
+	SelectedSprayBaseName = nil,
+	SelectedPlantSeedOption = nil,
 
 	SaveConfigEnabled = true,
 	RollDelay = 1.25,
@@ -87,8 +94,10 @@ local State = {
 	EggDelay = 30,
 	SellDelay = 15,
 	CompostDelay = 5,
-	PlantUpgradeDelay = 5,
+	PlantUpgradeDelay = 2.5,
 	PlantUpgradeTargetLevel = 40,
+	SprayDelay = 5,
+	PlantSeedDelay = 5,
 
 	WebhookURL = "",
 	WebhookSeedPurchases = true,
@@ -99,6 +108,8 @@ local State = {
 
 local SeedOptionMap = {}
 local CompostSeedOptionMap = {}
+local PlantSeedOptionMap = {}
+local SprayOptionMap = {}
 local GearNamesCache = nil
 local GearPriceCache = {}
 local PlotCache = nil
@@ -107,8 +118,14 @@ local FarmDirtCachePlot = nil
 local FarmDirtCacheTime = 0
 local GearBuyItemDelay = 0.2
 local EggBuyItemDelay = 0.2
-local PlantUpgradeItemDelay = 0.05
+local PlantUpgradePassDuration = 2.5
+local PlantUpgradeBatchSize = 30
+local PlantRemovePassDuration = 5
 local FarmDirtCacheTTL = 5
+local IsUpgradingPlants = false
+local IsRemovingPlants = false
+local IsSprayingPlants = false
+local IsPlantingSeeds = false
 
 local SeedRarityOptions = {
 	"Select Rarity",
@@ -375,6 +392,8 @@ local function getConfigData()
 		AutoSell = State.AutoSell,
 		AutoCompost = State.AutoCompost,
 		AutoUpgradePlants = State.AutoUpgradePlants,
+		AutoSprayPlants = State.AutoSprayPlants,
+		AutoPlantSeeds = State.AutoPlantSeeds,
 		AntiAFK = State.AntiAFK,
 		SelectedSeedOption = State.SelectedSeedOption,
 		SelectedSeeds = getSelectedSeedList(),
@@ -384,6 +403,9 @@ local function getConfigData()
 		SelectedEggRarities = getSelectedEggRarityList(),
 		SelectedCompostSeedOption = State.SelectedCompostSeedOption,
 		SelectedCompostSeeds = getSelectedCompostSeedList(),
+		SelectedSprayOption = State.SelectedSprayOption,
+		SelectedSprayBaseName = State.SelectedSprayBaseName,
+		SelectedPlantSeedOption = State.SelectedPlantSeedOption,
 		RollDelay = State.RollDelay,
 		GearDelay = State.GearDelay,
 		EggDelay = State.EggDelay,
@@ -391,6 +413,8 @@ local function getConfigData()
 		CompostDelay = State.CompostDelay,
 		PlantUpgradeDelay = State.PlantUpgradeDelay,
 		PlantUpgradeTargetLevel = State.PlantUpgradeTargetLevel,
+		SprayDelay = State.SprayDelay,
+		PlantSeedDelay = State.PlantSeedDelay,
 		WebhookURL = State.WebhookURL,
 		WebhookSeedPurchases = State.WebhookSeedPurchases,
 		WebhookExpensiveGear = State.WebhookExpensiveGear,
@@ -439,6 +463,8 @@ local function loadConfig()
 		"AutoSell",
 		"AutoCompost",
 		"AutoUpgradePlants",
+		"AutoSprayPlants",
+		"AutoPlantSeeds",
 		"AntiAFK",
 		"WebhookSeedPurchases",
 		"WebhookExpensiveGear",
@@ -456,12 +482,17 @@ local function loadConfig()
 		"CompostDelay",
 		"PlantUpgradeDelay",
 		"PlantUpgradeTargetLevel",
+		"SprayDelay",
+		"PlantSeedDelay",
 		"ExpensiveThreshold",
 	}) do
 		if type(data[key]) == "number" then
 			State[key] = data[key]
 		end
 	end
+
+	State.PlantUpgradeTargetLevel = math.clamp(math.floor(State.PlantUpgradeTargetLevel), 1, 100)
+	State.PlantUpgradeDelay = math.max(2.5, tonumber(State.PlantUpgradeDelay) or 2.5)
 
 	if type(data.WebhookURL) == "string" then
 		State.WebhookURL = data.WebhookURL
@@ -481,6 +512,18 @@ local function loadConfig()
 
 	if type(data.SelectedCompostSeedOption) == "string" then
 		State.SelectedCompostSeedOption = data.SelectedCompostSeedOption
+	end
+
+	if type(data.SelectedSprayOption) == "string" then
+		State.SelectedSprayOption = data.SelectedSprayOption
+	end
+
+	if type(data.SelectedSprayBaseName) == "string" then
+		State.SelectedSprayBaseName = data.SelectedSprayBaseName
+	end
+
+	if type(data.SelectedPlantSeedOption) == "string" then
+		State.SelectedPlantSeedOption = data.SelectedPlantSeedOption
 	end
 
 	if type(data.ExpensiveThresholdOption) == "string" then
@@ -795,6 +838,18 @@ local function getRemovePlantRemote()
 	return RemovePlantRemote
 end
 
+local function getUseSprayRemote()
+	UseSprayRemote = UseSprayRemote or Remotes:FindFirstChild("UseSpray") or Remotes:WaitForChild("UseSpray", 5)
+
+	return UseSprayRemote
+end
+
+local function getPlantSeedRemote()
+	PlantSeedRemote = PlantSeedRemote or Remotes:FindFirstChild("PlantSeed") or Remotes:WaitForChild("PlantSeed", 5)
+
+	return PlantSeedRemote
+end
+
 local function getFarmDirts(forceRefresh)
 	local plot = findMyPlot()
 	local now = os.clock()
@@ -843,12 +898,215 @@ local function isPlantedDirt(dirt)
 	end
 
 	local plantName = dirt:GetAttribute("PlantName")
+	local plantLevel = dirt:GetAttribute("PlantLevel")
 
-	return type(plantName) == "string" and plantName ~= ""
+	return type(plantName) == "string" and plantName ~= "" and tonumber(plantLevel) ~= nil
 end
 
 local function getPlantLevel(dirt)
 	return math.max(0, math.floor(tonumber(dirt and dirt:GetAttribute("PlantLevel")) or 0))
+end
+
+local function isOccupiedDirt(dirt)
+	if not dirt then
+		return false
+	end
+
+	local plantName = dirt:GetAttribute("PlantName")
+
+	return (type(plantName) == "string" and plantName ~= "")
+		or dirt:GetAttribute("PlantLevel") ~= nil
+		or dirt:GetAttribute("PlantTag") ~= nil
+end
+
+local function getPlantedDirts(forceRefresh)
+	local planted = {}
+
+	for _, dirt in ipairs(getFarmDirts(forceRefresh)) do
+		if isPlantedDirt(dirt) then
+			table.insert(planted, dirt)
+		end
+	end
+
+	return planted
+end
+
+local function getEmptyDirts(forceRefresh)
+	local empty = {}
+
+	for _, dirt in ipairs(getFarmDirts(forceRefresh)) do
+		if not isOccupiedDirt(dirt) then
+			table.insert(empty, dirt)
+		end
+	end
+
+	return empty
+end
+
+local function getSeedToolBaseName(toolName)
+	local name = tostring(toolName or "")
+
+	name = name:gsub("%s*%([xX]%d+%)%s*$", "")
+	name = name:gsub("_%d+_[%w%s]+$", "")
+	name = name:gsub("%s+[Ss]eed$", "")
+
+	return name
+end
+
+local function addSeedToolsFrom(container, tools)
+	if not container then
+		return
+	end
+
+	for _, item in ipairs(container:GetChildren()) do
+		if item:IsA("Tool") then
+			local baseName = getSeedToolBaseName(item.Name)
+
+			if SeedsFolder:FindFirstChild(baseName) then
+				table.insert(tools, item)
+			end
+		end
+	end
+end
+
+local function getSeedTools()
+	local tools = {}
+
+	addSeedToolsFrom(LocalPlayer:FindFirstChild("Backpack"), tools)
+	addSeedToolsFrom(LocalPlayer.Character, tools)
+
+	table.sort(tools, function(a, b)
+		return a.Name < b.Name
+	end)
+
+	return tools
+end
+
+local function getSelectedPlantSeedName()
+	local selected = State.SelectedPlantSeedOption
+
+	if not selected or selected == "Select Seed" or selected == "No Seeds Found" then
+		return nil
+	end
+
+	return PlantSeedOptionMap[selected] or selected
+end
+
+local function getSelectedSeedTool()
+	local seedName = getSelectedPlantSeedName()
+
+	if not seedName then
+		return nil
+	end
+
+	for _, tool in ipairs(getSeedTools()) do
+		local toolName = tool.Name
+
+		if
+			toolName == seedName
+			or toolName == getCompostSeedKey(seedName)
+			or getSeedToolBaseName(toolName) == seedName
+		then
+			return tool
+		end
+	end
+
+	return nil
+end
+
+local function equipTool(tool)
+	if not tool then
+		return false
+	end
+
+	local character = LocalPlayer.Character
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+
+	if not character or not humanoid then
+		return false
+	end
+
+	if tool.Parent == character then
+		return true
+	end
+
+	pcall(function()
+		humanoid:EquipTool(tool)
+	end)
+
+	task.wait(0.1)
+
+	return tool.Parent == character
+end
+
+local function getSprayBaseName(sprayName)
+	return tostring(sprayName or ""):gsub("%s*%([xX]%d+%)%s*$", "")
+end
+
+local function addSprayToolsFrom(container, tools)
+	if not container then
+		return
+	end
+
+	for _, item in ipairs(container:GetChildren()) do
+		if item:IsA("Tool") and item.Name:lower():find("spray", 1, true) then
+			table.insert(tools, item)
+		end
+	end
+end
+
+local function getSprayTools()
+	local tools = {}
+
+	addSprayToolsFrom(LocalPlayer:FindFirstChild("Backpack"), tools)
+	addSprayToolsFrom(LocalPlayer.Character, tools)
+
+	table.sort(tools, function(a, b)
+		return a.Name < b.Name
+	end)
+
+	return tools
+end
+
+local function getSelectedSprayTool()
+	local exact = State.SelectedSprayOption
+
+	if not exact or exact == "Select Spray" or exact == "No Sprays Found" then
+		return nil
+	end
+
+	if exact and SprayOptionMap[exact] and SprayOptionMap[exact].Parent then
+		return SprayOptionMap[exact]
+	end
+
+	local targetBase = State.SelectedSprayBaseName or getSprayBaseName(exact)
+
+	if targetBase == "" then
+		return nil
+	end
+
+	for _, tool in ipairs(getSprayTools()) do
+		if getSprayBaseName(tool.Name) == targetBase then
+			return tool
+		end
+	end
+
+	return nil
+end
+
+local function equipSprayTool(tool)
+	return equipTool(tool)
+end
+
+local function getPacedPlantDelay(actionCount, passDuration)
+	actionCount = math.max(0, tonumber(actionCount) or 0)
+	passDuration = math.max(0, tonumber(passDuration) or 0)
+
+	if actionCount <= 1 then
+		return 0
+	end
+
+	return passDuration / (actionCount - 1)
 end
 
 local function getMyGearStockFolder()
@@ -1556,42 +1814,74 @@ local function compostSelectedSeedsOnce(quiet)
 end
 
 local function upgradePlantsOnce(quiet)
+	if IsUpgradingPlants then
+		if not quiet then
+			OrionLib:MakeNotification({
+				Name = "Plant Upgrade Pass",
+				Content = "An upgrade pass is already running.",
+				Time = 3,
+			})
+		end
+
+		return 0
+	end
+
+	IsUpgradingPlants = true
+
 	local remote = getUpgradePlantRemote()
 	local dirts = getFarmDirts(false)
 	local targetLevel = math.max(1, math.floor(tonumber(State.PlantUpgradeTargetLevel) or 1))
+	local upgradeDirts = {}
 	local upgraded = 0
 	local skipped = 0
 
 	if not remote then
+		IsUpgradingPlants = false
 		consoleWarn("[PLOT] UpgradePlant remote not found.")
 		return 0
 	end
 
 	for _, dirt in ipairs(dirts) do
-		if ENV.Stop then
-			break
-		end
-
 		if isPlantedDirt(dirt) then
 			local level = getPlantLevel(dirt)
 
 			if level < targetLevel then
-				local ok, err = pcall(function()
-					return remote:InvokeServer(dirt)
-				end)
-
-				if ok then
-					upgraded += 1
-				else
-					consoleWarn("[PLOT UPGRADE FAILED]", dirt:GetFullName(), err)
+				if #upgradeDirts < PlantUpgradeBatchSize then
+					table.insert(upgradeDirts, dirt)
 				end
-
-				task.wait(PlantUpgradeItemDelay)
 			else
 				skipped += 1
 			end
 		end
 	end
+
+	local delayBetweenCalls = getPacedPlantDelay(#upgradeDirts, PlantUpgradePassDuration)
+
+	for index, dirt in ipairs(upgradeDirts) do
+		if ENV.Stop then
+			break
+		end
+
+		local currentLevel = getPlantLevel(dirt)
+
+		if isPlantedDirt(dirt) and currentLevel < targetLevel then
+			local ok, err = pcall(function()
+				return remote:InvokeServer(dirt)
+			end)
+
+			if ok then
+				upgraded += 1
+			else
+				consoleWarn("[PLOT UPGRADE FAILED]", dirt:GetFullName(), err)
+			end
+		end
+
+		if index < #upgradeDirts and delayBetweenCalls > 0 then
+			task.wait(delayBetweenCalls)
+		end
+	end
+
+	IsUpgradingPlants = false
 
 	if not quiet then
 		OrionLib:MakeNotification({
@@ -1606,16 +1896,38 @@ local function upgradePlantsOnce(quiet)
 end
 
 local function removeAllPlants()
+	if IsRemovingPlants then
+		OrionLib:MakeNotification({
+			Name = "Remove Plants",
+			Content = "A remove pass is already running.",
+			Time = 3,
+		})
+
+		return 0
+	end
+
+	IsRemovingPlants = true
+
 	local remote = getRemovePlantRemote()
 	local dirts = getFarmDirts(true)
+	local removeDirts = {}
 	local removed = 0
 
 	if not remote then
+		IsRemovingPlants = false
 		consoleWarn("[PLOT] RemovePlant remote not found.")
 		return 0
 	end
 
 	for _, dirt in ipairs(dirts) do
+		if isPlantedDirt(dirt) then
+			table.insert(removeDirts, dirt)
+		end
+	end
+
+	local delayBetweenCalls = getPacedPlantDelay(#removeDirts, PlantRemovePassDuration)
+
+	for index, dirt in ipairs(removeDirts) do
 		if ENV.Stop then
 			break
 		end
@@ -1630,10 +1942,14 @@ local function removeAllPlants()
 			else
 				consoleWarn("[PLOT REMOVE FAILED]", dirt:GetFullName(), err)
 			end
+		end
 
-			task.wait(PlantUpgradeItemDelay)
+		if index < #removeDirts and delayBetweenCalls > 0 then
+			task.wait(delayBetweenCalls)
 		end
 	end
+
+	IsRemovingPlants = false
 
 	OrionLib:MakeNotification({
 		Name = "Remove Plants",
@@ -1643,6 +1959,193 @@ local function removeAllPlants()
 
 	consolePrint("[PLOT REMOVE] removed:", removed)
 	return removed
+end
+
+local function sprayPlantsOnce(quiet)
+	if IsSprayingPlants then
+		if not quiet then
+			OrionLib:MakeNotification({
+				Name = "Plant Spray",
+				Content = "A spray pass is already running.",
+				Time = 3,
+			})
+		end
+
+		return 0
+	end
+
+	IsSprayingPlants = true
+
+	local remote = getUseSprayRemote()
+	local tool = getSelectedSprayTool()
+	local sprayed = 0
+
+	if not remote then
+		IsSprayingPlants = false
+		consoleWarn("[PLOT] UseSpray remote not found.")
+		return 0
+	end
+
+	if not tool then
+		IsSprayingPlants = false
+
+		if not quiet then
+			OrionLib:MakeNotification({
+				Name = "Plant Spray",
+				Content = "Pick a spray from the Plot tab first.",
+				Time = 3,
+			})
+		end
+
+		return 0
+	end
+
+	if not equipSprayTool(tool) then
+		IsSprayingPlants = false
+
+		if not quiet then
+			OrionLib:MakeNotification({
+				Name = "Plant Spray",
+				Content = "Could not equip " .. tool.Name .. ".",
+				Time = 3,
+			})
+		end
+
+		return 0
+	end
+
+	for _, dirt in ipairs(getPlantedDirts(false)) do
+		if ENV.Stop then
+			break
+		end
+
+		local ok, err = pcall(function()
+			remote:FireServer(dirt)
+		end)
+
+		if ok then
+			sprayed += 1
+		else
+			consoleWarn("[PLOT SPRAY FAILED]", dirt:GetFullName(), err)
+		end
+
+		task.wait(0.05)
+	end
+
+	IsSprayingPlants = false
+
+	if not quiet then
+		OrionLib:MakeNotification({
+			Name = "Plant Spray",
+			Content = "Spray request sent for " .. tostring(sprayed) .. " plants.",
+			Time = 3,
+		})
+	end
+
+	consolePrint("[PLOT SPRAY] sprayed:", sprayed, "spray:", tool.Name)
+	return sprayed
+end
+
+local function plantSeedsOnce(quiet)
+	if IsPlantingSeeds then
+		if not quiet then
+			OrionLib:MakeNotification({
+				Name = "Plant Seeds",
+				Content = "A planting pass is already running.",
+				Time = 3,
+			})
+		end
+
+		return 0
+	end
+
+	IsPlantingSeeds = true
+
+	local remote = getPlantSeedRemote()
+	local seedName = getSelectedPlantSeedName()
+	local tool = getSelectedSeedTool()
+	local planted = 0
+
+	if not remote then
+		IsPlantingSeeds = false
+		consoleWarn("[PLOT] PlantSeed remote not found.")
+		return 0
+	end
+
+	if not seedName then
+		IsPlantingSeeds = false
+
+		if not quiet then
+			OrionLib:MakeNotification({
+				Name = "Plant Seeds",
+				Content = "Pick a seed from the Plot tab first.",
+				Time = 3,
+			})
+		end
+
+		return 0
+	end
+
+	if not tool then
+		IsPlantingSeeds = false
+
+		if not quiet then
+			OrionLib:MakeNotification({
+				Name = "Plant Seeds",
+				Content = "No matching " .. seedName .. " seed tool found.",
+				Time = 3,
+			})
+		end
+
+		return 0
+	end
+
+	if not equipTool(tool) then
+		IsPlantingSeeds = false
+
+		if not quiet then
+			OrionLib:MakeNotification({
+				Name = "Plant Seeds",
+				Content = "Could not equip " .. tool.Name .. ".",
+				Time = 3,
+			})
+		end
+
+		return 0
+	end
+
+	for _, dirt in ipairs(getEmptyDirts(true)) do
+		if ENV.Stop then
+			break
+		end
+
+		if not isPlantedDirt(dirt) then
+			local ok, err = pcall(function()
+				remote:FireServer(dirt)
+			end)
+
+			if ok then
+				planted += 1
+			else
+				consoleWarn("[PLOT PLANT FAILED]", dirt:GetFullName(), err)
+			end
+
+			task.wait(0.05)
+		end
+	end
+
+	IsPlantingSeeds = false
+
+	if not quiet then
+		OrionLib:MakeNotification({
+			Name = "Plant Seeds",
+			Content = "Plant request sent for " .. tostring(planted) .. " empty spots.",
+			Time = 3,
+		})
+	end
+
+	consolePrint("[PLOT PLANT] planted:", planted, "seed:", seedName, "tool:", tool.Name)
+	return planted
 end
 
 local function simulateActivity()
@@ -2196,7 +2699,9 @@ PlotTab:AddSlider({
 PlotTab:AddButton({
 	Name = "Upgrade Plants Once",
 	Callback = function()
-		upgradePlantsOnce(false)
+		task.spawn(function()
+			upgradePlantsOnce(false)
+		end)
 	end,
 })
 
@@ -2212,13 +2717,288 @@ PlotTab:AddToggle({
 
 PlotTab:AddSlider({
 	Name = "Upgrade Pass Delay",
-	Min = 1,
+	Min = 2.5,
 	Max = 120,
 	Default = State.PlantUpgradeDelay,
-	Increment = 1,
+	Increment = 0.5,
 	ValueName = "sec",
 	Callback = function(value)
 		State.PlantUpgradeDelay = value
+		saveConfig()
+	end,
+})
+
+PlotTab:AddSection({
+	Name = "Seed Planting",
+})
+
+local IsRefreshingPlantSeedDropdown = false
+local PlantSeedDropdown
+local SelectedPlantSeedLabel
+local updateSelectedPlantSeedLabel
+
+SelectedPlantSeedLabel = PlotTab:AddParagraph("Selected Seed", State.SelectedPlantSeedOption or "None")
+
+function updateSelectedPlantSeedLabel()
+	if not SelectedPlantSeedLabel then
+		return
+	end
+
+	local seedName = getSelectedPlantSeedName()
+	local tool = getSelectedSeedTool()
+
+	if seedName and tool then
+		SelectedPlantSeedLabel:Set(seedName .. " | " .. tool.Name)
+	elseif seedName then
+		SelectedPlantSeedLabel:Set(seedName)
+	else
+		SelectedPlantSeedLabel:Set("None")
+	end
+end
+
+PlantSeedDropdown = PlotTab:AddDropdown({
+	Name = "Seed Dropdown",
+	Default = "Select Seed",
+	Options = {
+		"Select Seed",
+	},
+	Callback = function(value)
+		if IsRefreshingPlantSeedDropdown then
+			return
+		end
+
+		State.SelectedPlantSeedOption = value
+		updateSelectedPlantSeedLabel()
+		saveConfig()
+
+		local seedName = getSelectedPlantSeedName()
+
+		if seedName then
+			OrionLib:MakeNotification({
+				Name = "Plant Seed Selected",
+				Content = seedName .. " will be planted in empty dirt spots.",
+				Time = 3,
+			})
+		end
+	end,
+})
+
+local function refreshPlantSeedDropdown()
+	local seedNames = getSeedNames()
+	local options = {
+		"Select Seed",
+	}
+	PlantSeedOptionMap = {}
+
+	for _, seedName in ipairs(seedNames) do
+		table.insert(options, seedName)
+		PlantSeedOptionMap[seedName] = seedName
+	end
+
+	if #seedNames == 0 then
+		options = {
+			"No Seeds Found",
+		}
+	end
+
+	IsRefreshingPlantSeedDropdown = true
+	PlantSeedDropdown:Refresh(options, true)
+	pcall(function()
+		if State.SelectedPlantSeedOption and PlantSeedOptionMap[State.SelectedPlantSeedOption] then
+			PlantSeedDropdown:Set(State.SelectedPlantSeedOption)
+		elseif #seedNames == 0 then
+			PlantSeedDropdown:Set("No Seeds Found")
+		else
+			PlantSeedDropdown:Set("Select Seed")
+		end
+	end)
+	IsRefreshingPlantSeedDropdown = false
+	updateSelectedPlantSeedLabel()
+end
+
+PlotTab:AddButton({
+	Name = "Refresh Seed List",
+	Callback = function()
+		refreshPlantSeedDropdown()
+	end,
+})
+
+PlotTab:AddButton({
+	Name = "Plant Empty Spots Once",
+	Callback = function()
+		task.spawn(function()
+			plantSeedsOnce(false)
+		end)
+	end,
+})
+
+PlotTab:AddToggle({
+	Name = "Auto Plant Seeds",
+	Default = State.AutoPlantSeeds,
+	Callback = function(value)
+		State.AutoPlantSeeds = value
+		saveConfig()
+		consolePrint("[TOGGLE] Auto Plant Seeds:", value)
+	end,
+})
+
+PlotTab:AddSlider({
+	Name = "Plant Pass Delay",
+	Min = 1,
+	Max = 120,
+	Default = State.PlantSeedDelay,
+	Increment = 1,
+	ValueName = "sec",
+	Callback = function(value)
+		State.PlantSeedDelay = value
+		saveConfig()
+	end,
+})
+
+PlotTab:AddSection({
+	Name = "Plant Sprays",
+})
+
+local IsRefreshingSprayDropdown = false
+local SprayDropdown
+local SelectedSprayLabel
+local updateSelectedSprayLabel
+
+SelectedSprayLabel = PlotTab:AddParagraph("Selected Spray", State.SelectedSprayOption or "None")
+
+function updateSelectedSprayLabel()
+	if not SelectedSprayLabel then
+		return
+	end
+
+	local tool = getSelectedSprayTool()
+
+	if tool then
+		SelectedSprayLabel:Set(tool.Name)
+	elseif State.SelectedSprayOption and State.SelectedSprayOption ~= "Select Spray" then
+		SelectedSprayLabel:Set(State.SelectedSprayOption)
+	else
+		SelectedSprayLabel:Set("None")
+	end
+end
+
+SprayDropdown = PlotTab:AddDropdown({
+	Name = "Spray Dropdown",
+	Default = "Select Spray",
+	Options = {
+		"Select Spray",
+	},
+	Callback = function(value)
+		if IsRefreshingSprayDropdown then
+			return
+		end
+
+		State.SelectedSprayOption = value
+
+		if value ~= "Select Spray" and value ~= "No Sprays Found" then
+			State.SelectedSprayBaseName = getSprayBaseName(value)
+		else
+			State.SelectedSprayBaseName = nil
+		end
+
+		updateSelectedSprayLabel()
+		saveConfig()
+
+		if value ~= "Select Spray" and value ~= "No Sprays Found" then
+			OrionLib:MakeNotification({
+				Name = "Spray Selected",
+				Content = value .. " will be used for plant sprays.",
+				Time = 3,
+			})
+		end
+	end,
+})
+
+local function refreshSprayDropdown()
+	local tools = getSprayTools()
+	local options = {
+		"Select Spray",
+	}
+	SprayOptionMap = {}
+
+	for _, tool in ipairs(tools) do
+		table.insert(options, tool.Name)
+		SprayOptionMap[tool.Name] = tool
+	end
+
+	if #tools == 0 then
+		options = {
+			"No Sprays Found",
+		}
+	end
+
+	IsRefreshingSprayDropdown = true
+	SprayDropdown:Refresh(options, true)
+	pcall(function()
+		local selected = State.SelectedSprayOption
+		local didSet = false
+
+		if selected and SprayOptionMap[selected] then
+			SprayDropdown:Set(selected)
+			didSet = true
+		elseif State.SelectedSprayBaseName then
+			for _, option in ipairs(options) do
+				if getSprayBaseName(option) == State.SelectedSprayBaseName then
+					State.SelectedSprayOption = option
+					SprayDropdown:Set(option)
+					didSet = true
+					break
+				end
+			end
+		end
+
+		if not didSet then
+			if #tools == 0 then
+				SprayDropdown:Set("No Sprays Found")
+			else
+				SprayDropdown:Set("Select Spray")
+			end
+		end
+	end)
+	IsRefreshingSprayDropdown = false
+	updateSelectedSprayLabel()
+end
+
+PlotTab:AddButton({
+	Name = "Refresh Sprays",
+	Callback = function()
+		refreshSprayDropdown()
+	end,
+})
+
+PlotTab:AddButton({
+	Name = "Spray Plants Once",
+	Callback = function()
+		task.spawn(function()
+			sprayPlantsOnce(false)
+		end)
+	end,
+})
+
+PlotTab:AddToggle({
+	Name = "Auto Spray Plants",
+	Default = State.AutoSprayPlants,
+	Callback = function(value)
+		State.AutoSprayPlants = value
+		saveConfig()
+		consolePrint("[TOGGLE] Auto Spray Plants:", value)
+	end,
+})
+
+PlotTab:AddSlider({
+	Name = "Spray Pass Delay",
+	Min = 1,
+	Max = 120,
+	Default = State.SprayDelay,
+	Increment = 1,
+	ValueName = "sec",
+	Callback = function(value)
+		State.SprayDelay = value
 		saveConfig()
 	end,
 })
@@ -2230,7 +3010,9 @@ PlotTab:AddSection({
 PlotTab:AddButton({
 	Name = "Remove All Plants",
 	Callback = function()
-		removeAllPlants()
+		task.spawn(function()
+			removeAllPlants()
+		end)
 	end,
 })
 
@@ -2538,8 +3320,34 @@ end)
 task.spawn(function()
 	while not ENV.Stop do
 		if State.AutoUpgradePlants then
+			local startedAt = os.clock()
+
 			upgradePlantsOnce(true)
-			task.wait(math.max(1, State.PlantUpgradeDelay))
+
+			local elapsed = os.clock() - startedAt
+			task.wait(math.max(0, math.max(2.5, State.PlantUpgradeDelay) - elapsed))
+		else
+			task.wait(0.25)
+		end
+	end
+end)
+
+task.spawn(function()
+	while not ENV.Stop do
+		if State.AutoPlantSeeds then
+			plantSeedsOnce(true)
+			task.wait(math.max(1, State.PlantSeedDelay))
+		else
+			task.wait(0.25)
+		end
+	end
+end)
+
+task.spawn(function()
+	while not ENV.Stop do
+		if State.AutoSprayPlants then
+			sprayPlantsOnce(true)
+			task.wait(math.max(1, State.SprayDelay))
 		else
 			task.wait(0.25)
 		end
@@ -2561,10 +3369,14 @@ end)
 
 refreshSeedDropdown()
 refreshCompostSeedDropdown()
+refreshPlantSeedDropdown()
+refreshSprayDropdown()
 updateSelectedSeedsLabel()
 updateSelectedSeedRaritiesLabel()
 updateSelectedEggRaritiesLabel()
 updateCompostSeedLabel()
+updateSelectedPlantSeedLabel()
+updateSelectedSprayLabel()
 
 OrionLib:MakeNotification({
 	Name = "Loaded",
