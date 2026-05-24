@@ -1,5 +1,4 @@
---// Fortune Seed / Shop UI - Orion Version
---// Use only where you are allowed to run client-side automation.
+--loadstring(game:HttpGet("https://raw.githubusercontent.com/G07HN-1/supreme-palm-tree/refs/heads/main/script.lua"))()
 
 if getgenv().FortuneSeedUI then
 	getgenv().FortuneSeedUI.Stop = true
@@ -25,6 +24,8 @@ local SellCratesRemote = Remotes:WaitForChild("SellCrates")
 
 local GearRemote = Remotes:FindFirstChild("Gear")
 local GearTransaction = GearRemote and GearRemote:FindFirstChild("Transaction")
+local EggShopRemote = Remotes:FindFirstChild("EggShop")
+local EggShopTransaction = EggShopRemote and EggShopRemote:FindFirstChild("Transaction")
 
 local Assets = ReplicatedStorage:WaitForChild("Assets")
 local SeedsFolder = Assets:WaitForChild("Seeds")
@@ -44,16 +45,21 @@ local State = {
 	AutoBuySelectedSeedRarities = false,
 
 	AutoBuyAllGear = false,
+	AutoBuyAllEggs = false,
+	AutoBuySelectedEggRarities = false,
 	AutoSell = false,
 
 	SelectedSeedOption = nil,
 	SelectedSeeds = {},
 	SelectedSeedRarityOption = nil,
 	SelectedSeedRarities = {},
+	SelectedEggRarityOption = nil,
+	SelectedEggRarities = {},
 
 	SaveConfigEnabled = false,
 	RollDelay = 1.25,
 	GearDelay = 30,
+	EggDelay = 30,
 	SellDelay = 15,
 
 	WebhookURL = "",
@@ -67,6 +73,7 @@ local SeedOptionMap = {}
 local GearNamesCache = nil
 local GearPriceCache = {}
 local GearBuyItemDelay = 0.2
+local EggBuyItemDelay = 0.2
 
 local SeedRarityOptions = {
 	"Select Rarity",
@@ -94,6 +101,13 @@ local SeedRarityColors = {
 	Exotic = 16744192, -- orange
 	Transcended = 65535, -- cyan
 	Unknown = 8421504, -- gray
+}
+
+local EggRarityOptions = {
+	"Select Rarity",
+	"Common",
+	"Rare",
+	"Epic",
 }
 
 local ConsoleOutput = false
@@ -254,6 +268,36 @@ local function applySelectedSeedRarities(savedRarities)
 	end
 end
 
+local function getSelectedEggRarityList()
+	local rarities = {}
+
+	for rarity, enabled in pairs(State.SelectedEggRarities) do
+		if enabled then
+			table.insert(rarities, rarity)
+		end
+	end
+
+	table.sort(rarities)
+
+	return rarities
+end
+
+local function applySelectedEggRarities(savedRarities)
+	State.SelectedEggRarities = {}
+
+	if type(savedRarities) ~= "table" then
+		return
+	end
+
+	for key, value in pairs(savedRarities) do
+		if type(key) == "number" and type(value) == "string" then
+			State.SelectedEggRarities[value] = true
+		elseif type(key) == "string" and value then
+			State.SelectedEggRarities[key] = true
+		end
+	end
+end
+
 local function getConfigData()
 	return {
 		SaveConfigEnabled = State.SaveConfigEnabled,
@@ -261,13 +305,18 @@ local function getConfigData()
 		AutoBuySelectedSeeds = State.AutoBuySelectedSeeds,
 		AutoBuySelectedSeedRarities = State.AutoBuySelectedSeedRarities,
 		AutoBuyAllGear = State.AutoBuyAllGear,
+		AutoBuyAllEggs = State.AutoBuyAllEggs,
+		AutoBuySelectedEggRarities = State.AutoBuySelectedEggRarities,
 		AutoSell = State.AutoSell,
 		SelectedSeedOption = State.SelectedSeedOption,
 		SelectedSeeds = getSelectedSeedList(),
 		SelectedSeedRarityOption = State.SelectedSeedRarityOption,
 		SelectedSeedRarities = getSelectedSeedRarityList(),
+		SelectedEggRarityOption = State.SelectedEggRarityOption,
+		SelectedEggRarities = getSelectedEggRarityList(),
 		RollDelay = State.RollDelay,
 		GearDelay = State.GearDelay,
+		EggDelay = State.EggDelay,
 		SellDelay = State.SellDelay,
 		WebhookURL = State.WebhookURL,
 		WebhookSeedPurchases = State.WebhookSeedPurchases,
@@ -321,6 +370,8 @@ local function loadConfig()
 		"AutoBuySelectedSeeds",
 		"AutoBuySelectedSeedRarities",
 		"AutoBuyAllGear",
+		"AutoBuyAllEggs",
+		"AutoBuySelectedEggRarities",
 		"AutoSell",
 		"WebhookSeedPurchases",
 		"WebhookExpensiveGear",
@@ -333,6 +384,7 @@ local function loadConfig()
 	for _, key in ipairs({
 		"RollDelay",
 		"GearDelay",
+		"EggDelay",
 		"SellDelay",
 		"ExpensiveThreshold",
 	}) do
@@ -353,6 +405,10 @@ local function loadConfig()
 		State.SelectedSeedRarityOption = data.SelectedSeedRarityOption
 	end
 
+	if type(data.SelectedEggRarityOption) == "string" then
+		State.SelectedEggRarityOption = data.SelectedEggRarityOption
+	end
+
 	if type(data.ExpensiveThresholdOption) == "string" then
 		State.ExpensiveThresholdOption = data.ExpensiveThresholdOption
 		State.ExpensiveThreshold = parsePrice(data.ExpensiveThresholdOption)
@@ -360,6 +416,7 @@ local function loadConfig()
 
 	applySelectedSeeds(data.SelectedSeeds)
 	applySelectedSeedRarities(data.SelectedSeedRarities)
+	applySelectedEggRarities(data.SelectedEggRarities)
 end
 
 --// BASIC INSTANCE UTILS
@@ -726,6 +783,86 @@ local function getSeedRarityColor(rarity)
 	return SeedRarityColors[normalizeSeedRarity(rarity)] or SeedRarityColors.Unknown
 end
 
+local function normalizeEggRarity(rawRarity)
+	local text = trim(rawRarity or "")
+
+	if text == "" then
+		return nil
+	end
+
+	local compact = string.lower(text):gsub("%s+", "")
+
+	for index = 2, #EggRarityOptions do
+		local rarity = EggRarityOptions[index]
+		local lowerRarity = string.lower(rarity)
+
+		if compact == lowerRarity or compact == lowerRarity .. "egg" then
+			return rarity
+		end
+	end
+
+	for index = 2, #EggRarityOptions do
+		local rarity = EggRarityOptions[index]
+
+		if compact:find(string.lower(rarity), 1, true) then
+			return rarity
+		end
+	end
+
+	return nil
+end
+
+local function getEggPodium(slot)
+	local merchant = workspace:FindFirstChild("PetMerchant")
+
+	if not merchant then
+		return nil
+	end
+
+	return merchant:FindFirstChild("Podium" .. tostring(slot) .. "Stock")
+		or merchant:FindFirstChild("Podium" .. tostring(slot))
+end
+
+local function getEggLabel(podium)
+	if not podium then
+		return nil
+	end
+
+	local surfaceGui = podium:FindFirstChild("SurfaceGui")
+
+	if surfaceGui then
+		local label = surfaceGui:FindFirstChild("EggLabel")
+
+		if label then
+			return label
+		end
+	end
+
+	return podium:FindFirstChild("EggLabel", true)
+end
+
+local function scanEggShop()
+	local eggs = {}
+
+	for slot = 1, 5 do
+		local podium = getEggPodium(slot)
+		local label = getEggLabel(podium)
+		local labelText = getText(label)
+		local rarity = normalizeEggRarity(labelText)
+
+		table.insert(eggs, {
+			Slot = slot,
+			Name = rarity and rarity .. "Egg" or labelText,
+			Rarity = rarity,
+			LabelText = labelText,
+			Podium = podium,
+			Label = label,
+		})
+	end
+
+	return eggs
+end
+
 --// DISCORD WEBHOOK
 
 local function getRequestFunction()
@@ -894,6 +1031,88 @@ local function buySelectedSeedsFromCurrentRoll()
 	return #seedsToBuy
 end
 
+local function getEggShopTransaction()
+	if EggShopTransaction then
+		return EggShopTransaction
+	end
+
+	EggShopRemote = EggShopRemote or Remotes:FindFirstChild("EggShop") or Remotes:WaitForChild("EggShop", 5)
+	EggShopTransaction = EggShopRemote
+		and (EggShopRemote:FindFirstChild("Transaction") or EggShopRemote:WaitForChild("Transaction", 5))
+
+	return EggShopTransaction
+end
+
+local function buyEggSlot(egg, quiet)
+	local transaction = getEggShopTransaction()
+
+	if not transaction then
+		consoleWarn("[EGG] Egg shop transaction remote not found.")
+		return false
+	end
+
+	if not egg or not egg.Slot then
+		return false
+	end
+
+	local ok, result = pcall(function()
+		return transaction:InvokeServer("BuyEgg", egg.Slot)
+	end)
+
+	if ok then
+		if not quiet then
+			consolePrint(
+				"[EGG BUY]",
+				egg.Name or "Unknown",
+				"slot:",
+				tostring(egg.Slot),
+				"rarity:",
+				egg.Rarity or "Unknown",
+				"result:",
+				result
+			)
+		end
+
+		return true
+	else
+		consoleWarn("[EGG BUY FAILED]", egg.Name or "Unknown", "slot:", tostring(egg.Slot), result)
+		return false
+	end
+end
+
+local function buyEggsOnce(buyAll)
+	local currentEggs = scanEggShop()
+	local bought = 0
+	local attempted = 0
+
+	for _, egg in ipairs(currentEggs) do
+		if ENV.Stop then
+			return bought
+		end
+
+		local selectedByRarity = egg.Rarity and State.SelectedEggRarities[egg.Rarity]
+
+		if egg.Rarity and (buyAll or selectedByRarity) then
+			attempted += 1
+
+			if buyEggSlot(egg, true) then
+				bought += 1
+			end
+
+			task.wait(EggBuyItemDelay)
+		end
+	end
+
+	consolePrint(
+		"[EGG BUY] Finished egg pass. attempted:",
+		tostring(attempted),
+		"successful calls:",
+		tostring(bought)
+	)
+
+	return bought
+end
+
 local function rollSeeds()
 	local ok, err = pcall(function()
 		RollSeedsRemote:FireServer()
@@ -1017,6 +1236,12 @@ local Window = OrionLib:MakeWindow({
 local SeedsTab = Window:MakeTab({
 	Name = "Seeds",
 	Icon = "leaf",
+	PremiumOnly = false,
+})
+
+local EggsTab = Window:MakeTab({
+	Name = "Eggs",
+	Icon = "egg",
 	PremiumOnly = false,
 })
 
@@ -1225,6 +1450,121 @@ SeedsTab:AddToggle({
 	end,
 })
 
+--// EGGS TAB
+
+EggsTab:AddSection({
+	Name = "Pet Merchant",
+})
+
+local SelectedEggRaritiesLabel
+local updateSelectedEggRaritiesLabel
+
+SelectedEggRaritiesLabel = EggsTab:AddParagraph("Selected Egg Rarities", "None")
+
+function updateSelectedEggRaritiesLabel()
+	if not SelectedEggRaritiesLabel then
+		return
+	end
+
+	local rarities = getSelectedEggRarityList()
+
+	if #rarities == 0 then
+		SelectedEggRaritiesLabel:Set("None")
+	else
+		SelectedEggRaritiesLabel:Set(table.concat(rarities, ", "))
+	end
+end
+
+EggsTab:AddDropdown({
+	Name = "Egg Rarity Selector",
+	Default = getSafeDropdownDefault(EggRarityOptions, State.SelectedEggRarityOption, "Select Rarity"),
+	Options = EggRarityOptions,
+	Callback = function(value)
+		State.SelectedEggRarityOption = value
+
+		if value == "Select Rarity" then
+			saveConfig()
+			return
+		end
+
+		State.SelectedEggRarities[value] = true
+		updateSelectedEggRaritiesLabel()
+		saveConfig()
+
+		OrionLib:MakeNotification({
+			Name = "Egg Rarity Selected",
+			Content = value .. " eggs will be bought from the merchant.",
+			Time = 3,
+		})
+	end,
+})
+
+EggsTab:AddButton({
+	Name = "Clear Selected Egg Rarities",
+	Callback = function()
+		table.clear(State.SelectedEggRarities)
+		updateSelectedEggRaritiesLabel()
+		saveConfig()
+
+		OrionLib:MakeNotification({
+			Name = "Cleared",
+			Content = "Selected egg rarities cleared.",
+			Time = 3,
+		})
+	end,
+})
+
+EggsTab:AddButton({
+	Name = "Buy Selected Egg Rarities Once",
+	Callback = function()
+		buyEggsOnce(false)
+	end,
+})
+
+EggsTab:AddToggle({
+	Name = "Auto Buy Selected Egg Rarities",
+	Default = State.AutoBuySelectedEggRarities,
+	Callback = function(value)
+		State.AutoBuySelectedEggRarities = value
+		saveConfig()
+		consolePrint("[TOGGLE] Auto Buy Selected Egg Rarities:", value)
+	end,
+})
+
+EggsTab:AddSection({
+	Name = "All Eggs",
+})
+
+EggsTab:AddButton({
+	Name = "Buy All Eggs Once",
+	Callback = function()
+		buyEggsOnce(true)
+	end,
+})
+
+EggsTab:AddToggle({
+	Name = "Auto Buy All Eggs",
+	Default = State.AutoBuyAllEggs,
+	Callback = function(value)
+		State.AutoBuyAllEggs = value
+		saveConfig()
+		consolePrint("[TOGGLE] Auto Buy All Eggs:", value)
+	end,
+})
+
+EggsTab:AddSlider({
+	Name = "Egg Buy Loop Delay",
+	Min = 1,
+	Max = 120,
+	Default = State.EggDelay,
+	Increment = 1,
+	ValueName = "sec",
+	Callback = function(value)
+		State.EggDelay = value
+		saveConfig()
+	end,
+})
+
 --// AUTO BUY TAB
 
 AutoBuyTab:AddSection({
@@ -1426,6 +1766,30 @@ SettingsTab:AddButton({
 })
 
 SettingsTab:AddButton({
+	Name = "Print Current Merchant Eggs",
+	Callback = function()
+		local eggs = scanEggShop()
+
+		consolePrint("========== CURRENT MERCHANT EGGS ==========")
+
+		for _, egg in ipairs(eggs) do
+			consolePrint(
+				"Slot "
+					.. egg.Slot
+					.. " = "
+					.. tostring(egg.Name)
+					.. " | "
+					.. tostring(egg.Rarity or "Unknown")
+					.. " | "
+					.. tostring(egg.LabelText)
+			)
+		end
+
+		consolePrint("===========================================")
+	end,
+})
+
+SettingsTab:AddButton({
 	Name = "Destroy UI",
 	Callback = function()
 		ENV.Stop = true
@@ -1468,6 +1832,17 @@ end)
 
 task.spawn(function()
 	while not ENV.Stop do
+		if State.AutoBuyAllEggs or State.AutoBuySelectedEggRarities then
+			buyEggsOnce(State.AutoBuyAllEggs)
+			task.wait(math.max(1, State.EggDelay))
+		else
+			task.wait(0.25)
+		end
+	end
+end)
+
+task.spawn(function()
+	while not ENV.Stop do
 		if State.AutoSell then
 			sellCrates()
 			task.wait(math.max(1, State.SellDelay))
@@ -1482,6 +1857,7 @@ end)
 refreshSeedDropdown()
 updateSelectedSeedsLabel()
 updateSelectedSeedRaritiesLabel()
+updateSelectedEggRaritiesLabel()
 
 OrionLib:MakeNotification({
 	Name = "Loaded",
