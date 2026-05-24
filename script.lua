@@ -76,8 +76,9 @@ local State = {
 	SelectedEggRarityOption = nil,
 	SelectedEggRarities = {},
 	SelectedCompostSeedOption = nil,
+	SelectedCompostSeeds = {},
 
-	SaveConfigEnabled = false,
+	SaveConfigEnabled = true,
 	RollDelay = 1.25,
 	GearDelay = 30,
 	EggDelay = 30,
@@ -321,6 +322,36 @@ local function applySelectedEggRarities(savedRarities)
 	end
 end
 
+local function getSelectedCompostSeedList()
+	local names = {}
+
+	for name, enabled in pairs(State.SelectedCompostSeeds) do
+		if enabled then
+			table.insert(names, name)
+		end
+	end
+
+	table.sort(names)
+
+	return names
+end
+
+local function applySelectedCompostSeeds(savedSeeds)
+	State.SelectedCompostSeeds = {}
+
+	if type(savedSeeds) ~= "table" then
+		return
+	end
+
+	for key, value in pairs(savedSeeds) do
+		if type(key) == "number" and type(value) == "string" then
+			State.SelectedCompostSeeds[value] = true
+		elseif type(key) == "string" and value then
+			State.SelectedCompostSeeds[key] = true
+		end
+	end
+end
+
 local function getConfigData()
 	return {
 		SaveConfigEnabled = State.SaveConfigEnabled,
@@ -340,6 +371,7 @@ local function getConfigData()
 		SelectedEggRarityOption = State.SelectedEggRarityOption,
 		SelectedEggRarities = getSelectedEggRarityList(),
 		SelectedCompostSeedOption = State.SelectedCompostSeedOption,
+		SelectedCompostSeeds = getSelectedCompostSeedList(),
 		RollDelay = State.RollDelay,
 		GearDelay = State.GearDelay,
 		EggDelay = State.EggDelay,
@@ -354,7 +386,7 @@ local function getConfigData()
 end
 
 local function saveConfig(force)
-	if not force and not State.SaveConfigEnabled then
+	if not force and State.SaveConfigEnabled == false then
 		return
 	end
 
@@ -383,11 +415,6 @@ local function loadConfig()
 
 	if not ok or type(data) ~= "table" then
 		consoleWarn("[CONFIG] Load failed:", data)
-		return
-	end
-
-	if data.SaveConfigEnabled ~= true then
-		State.SaveConfigEnabled = false
 		return
 	end
 
@@ -451,6 +478,16 @@ local function loadConfig()
 	applySelectedSeeds(data.SelectedSeeds)
 	applySelectedSeedRarities(data.SelectedSeedRarities)
 	applySelectedEggRarities(data.SelectedEggRarities)
+	applySelectedCompostSeeds(data.SelectedCompostSeeds)
+
+	if
+		next(State.SelectedCompostSeeds) == nil
+		and type(data.SelectedCompostSeedOption) == "string"
+		and data.SelectedCompostSeedOption ~= "Select Seed"
+		and data.SelectedCompostSeedOption ~= "No Seeds Found"
+	then
+		State.SelectedCompostSeeds[data.SelectedCompostSeedOption] = true
+	end
 end
 
 --// BASIC INSTANCE UTILS
@@ -716,6 +753,16 @@ end
 
 local function getCompostSeedKey(seedName)
 	return tostring(seedName) .. "_1_Normal"
+end
+
+local function getSelectedCompostSeedKeyList()
+	local keys = {}
+
+	for _, seedName in ipairs(getSelectedCompostSeedList()) do
+		table.insert(keys, getCompostSeedKey(seedName))
+	end
+
+	return keys
 end
 
 local function getMyGearStockFolder()
@@ -1329,9 +1376,8 @@ local function sellCrates()
 	end
 end
 
-local function compostSelectedSeedOnce(quiet)
+local function compostSeedOnce(seedName, quiet)
 	local insertSeed, pullLever = getComposterRemotes()
-	local seedName = getSelectedCompostSeedName()
 
 	if not insertSeed or not pullLever then
 		consoleWarn("[COMPOST] Composter remotes not found.")
@@ -1342,7 +1388,7 @@ local function compostSelectedSeedOnce(quiet)
 		if not quiet then
 			OrionLib:MakeNotification({
 				Name = "No Compost Seed",
-				Content = "Pick a seed in the Compost tab first.",
+				Content = "Pick at least one seed in the Compost tab first.",
 				Time = 3,
 			})
 		end
@@ -1384,6 +1430,43 @@ local function compostSelectedSeedOnce(quiet)
 		consoleWarn("[COMPOST PULL FAILED]", seedKey, pullResult)
 		return false
 	end
+end
+
+local function compostSelectedSeedsOnce(quiet)
+	local seedNames = getSelectedCompostSeedList()
+	local composted = 0
+
+	if #seedNames == 0 then
+		return compostSeedOnce(nil, quiet)
+	end
+
+	for _, seedName in ipairs(seedNames) do
+		if ENV.Stop then
+			break
+		end
+
+		if compostSeedOnce(seedName, true) then
+			composted += 1
+		end
+
+		task.wait(0.1)
+	end
+
+	if not quiet and composted > 0 then
+		local content = tostring(composted) .. " selected seed variant"
+
+		if composted ~= 1 then
+			content ..= "s"
+		end
+
+		OrionLib:MakeNotification({
+			Name = "Composted",
+			Content = content .. " sent to the composter.",
+			Time = 3,
+		})
+	end
+
+	return composted
 end
 
 local function simulateActivity()
@@ -1777,17 +1860,17 @@ local IsRefreshingCompostSeedDropdown = false
 local CompostSeedLabel
 local updateCompostSeedLabel
 
-CompostSeedLabel = CompostTab:AddParagraph("Selected Seed Variant", "None")
+CompostSeedLabel = CompostTab:AddParagraph("Selected Seed Variants", "None")
 
 function updateCompostSeedLabel()
 	if not CompostSeedLabel then
 		return
 	end
 
-	local seedName = getSelectedCompostSeedName()
+	local seedKeys = getSelectedCompostSeedKeyList()
 
-	if seedName then
-		CompostSeedLabel:Set(getCompostSeedKey(seedName))
+	if #seedKeys > 0 then
+		CompostSeedLabel:Set(table.concat(seedKeys, ", "))
 	else
 		CompostSeedLabel:Set("None")
 	end
@@ -1807,16 +1890,21 @@ local CompostSeedDropdown = CompostTab:AddDropdown({
 		end
 
 		updateCompostSeedLabel()
-		saveConfig()
 
 		local seedName = getSelectedCompostSeedName()
 
 		if seedName then
+			State.SelectedCompostSeeds[seedName] = true
+			updateCompostSeedLabel()
+			saveConfig()
+
 			OrionLib:MakeNotification({
 				Name = "Compost Seed Selected",
-				Content = getCompostSeedKey(seedName) .. " will be composted.",
+				Content = getCompostSeedKey(seedName) .. " was added to compost seeds.",
 				Time = 3,
 			})
+		else
+			saveConfig()
 		end
 	end,
 })
@@ -1860,14 +1948,29 @@ CompostTab:AddButton({
 })
 
 CompostTab:AddButton({
-	Name = "Compost Selected Once",
+	Name = "Clear Selected Compost Seeds",
 	Callback = function()
-		compostSelectedSeedOnce(false)
+		table.clear(State.SelectedCompostSeeds)
+		updateCompostSeedLabel()
+		saveConfig()
+
+		OrionLib:MakeNotification({
+			Name = "Cleared",
+			Content = "Selected compost seeds cleared.",
+			Time = 3,
+		})
+	end,
+})
+
+CompostTab:AddButton({
+	Name = "Compost Selected Seeds Once",
+	Callback = function()
+		compostSelectedSeedsOnce(false)
 	end,
 })
 
 CompostTab:AddToggle({
-	Name = "Auto Compost Selected Seed",
+	Name = "Auto Compost Selected Seeds",
 	Default = State.AutoCompost,
 	Callback = function(value)
 		State.AutoCompost = value
@@ -2182,7 +2285,7 @@ end)
 task.spawn(function()
 	while not ENV.Stop do
 		if State.AutoCompost then
-			compostSelectedSeedOnce(true)
+			compostSelectedSeedsOnce(true)
 			task.wait(math.max(1, State.CompostDelay))
 		else
 			task.wait(0.25)
