@@ -35,6 +35,8 @@ local Remotes = ReplicatedStorage:WaitForChild("Remotes")
 local RollSeedsRemote = Remotes:WaitForChild("RollSeeds")
 local BuySeedRemote = Remotes:WaitForChild("BuySeed")
 local SellCratesRemote = Remotes:WaitForChild("SellCrates")
+local UpgradePlantRemote = Remotes:FindFirstChild("UpgradePlant")
+local RemovePlantRemote = Remotes:FindFirstChild("RemovePlant")
 
 local GearRemote = Remotes:FindFirstChild("Gear")
 local GearTransaction = GearRemote and GearRemote:FindFirstChild("Transaction")
@@ -67,6 +69,7 @@ local State = {
 	AutoBuySelectedEggRarities = false,
 	AutoSell = false,
 	AutoCompost = false,
+	AutoUpgradePlants = false,
 	AntiAFK = true,
 
 	SelectedSeedOption = nil,
@@ -84,6 +87,8 @@ local State = {
 	EggDelay = 30,
 	SellDelay = 15,
 	CompostDelay = 5,
+	PlantUpgradeDelay = 5,
+	PlantUpgradeTargetLevel = 40,
 
 	WebhookURL = "",
 	WebhookSeedPurchases = true,
@@ -96,8 +101,14 @@ local SeedOptionMap = {}
 local CompostSeedOptionMap = {}
 local GearNamesCache = nil
 local GearPriceCache = {}
+local PlotCache = nil
+local FarmDirtCache = nil
+local FarmDirtCachePlot = nil
+local FarmDirtCacheTime = 0
 local GearBuyItemDelay = 0.2
 local EggBuyItemDelay = 0.2
+local PlantUpgradeItemDelay = 0.05
+local FarmDirtCacheTTL = 5
 
 local SeedRarityOptions = {
 	"Select Rarity",
@@ -363,6 +374,7 @@ local function getConfigData()
 		AutoBuySelectedEggRarities = State.AutoBuySelectedEggRarities,
 		AutoSell = State.AutoSell,
 		AutoCompost = State.AutoCompost,
+		AutoUpgradePlants = State.AutoUpgradePlants,
 		AntiAFK = State.AntiAFK,
 		SelectedSeedOption = State.SelectedSeedOption,
 		SelectedSeeds = getSelectedSeedList(),
@@ -377,6 +389,8 @@ local function getConfigData()
 		EggDelay = State.EggDelay,
 		SellDelay = State.SellDelay,
 		CompostDelay = State.CompostDelay,
+		PlantUpgradeDelay = State.PlantUpgradeDelay,
+		PlantUpgradeTargetLevel = State.PlantUpgradeTargetLevel,
 		WebhookURL = State.WebhookURL,
 		WebhookSeedPurchases = State.WebhookSeedPurchases,
 		WebhookExpensiveGear = State.WebhookExpensiveGear,
@@ -386,10 +400,6 @@ local function getConfigData()
 end
 
 local function saveConfig(force)
-	if not force and State.SaveConfigEnabled == false then
-		return
-	end
-
 	if not canUseFileConfig() then
 		consoleWarn("[CONFIG] File config functions are not available.")
 		return
@@ -428,6 +438,7 @@ local function loadConfig()
 		"AutoBuySelectedEggRarities",
 		"AutoSell",
 		"AutoCompost",
+		"AutoUpgradePlants",
 		"AntiAFK",
 		"WebhookSeedPurchases",
 		"WebhookExpensiveGear",
@@ -443,6 +454,8 @@ local function loadConfig()
 		"EggDelay",
 		"SellDelay",
 		"CompostDelay",
+		"PlantUpgradeDelay",
+		"PlantUpgradeTargetLevel",
 		"ExpensiveThreshold",
 	}) do
 		if type(data[key]) == "number" then
@@ -553,6 +566,10 @@ end
 --// PLOT + SEED SCANNER
 
 local function findMyPlot()
+	if PlotCache and PlotCache.Parent then
+		return PlotCache
+	end
+
 	local plots = workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("Plots")
 	if not plots then
 		return nil
@@ -567,6 +584,7 @@ local function findMyPlot()
 					local owner = getText(obj)
 
 					if owner == LocalPlayer.DisplayName or owner == LocalPlayer.Name then
+						PlotCache = plot
 						return plot
 					end
 				end
@@ -763,6 +781,74 @@ local function getSelectedCompostSeedKeyList()
 	end
 
 	return keys
+end
+
+local function getUpgradePlantRemote()
+	UpgradePlantRemote = UpgradePlantRemote or Remotes:FindFirstChild("UpgradePlant") or Remotes:WaitForChild("UpgradePlant", 5)
+
+	return UpgradePlantRemote
+end
+
+local function getRemovePlantRemote()
+	RemovePlantRemote = RemovePlantRemote or Remotes:FindFirstChild("RemovePlant") or Remotes:WaitForChild("RemovePlant", 5)
+
+	return RemovePlantRemote
+end
+
+local function getFarmDirts(forceRefresh)
+	local plot = findMyPlot()
+	local now = os.clock()
+
+	if
+		not forceRefresh
+		and FarmDirtCache
+		and FarmDirtCachePlot == plot
+		and now - FarmDirtCacheTime < FarmDirtCacheTTL
+	then
+		return FarmDirtCache
+	end
+
+	local dirts = {}
+	local farmPlot = plot and plot:FindFirstChild("FarmPlot")
+
+	if farmPlot then
+		for _, plotPart in ipairs(farmPlot:GetChildren()) do
+			if plotPart.Name:match("^Plot%d+$") then
+				local dirt = plotPart:FindFirstChild("Dirt")
+
+				if dirt then
+					table.insert(dirts, dirt)
+				end
+			end
+		end
+	end
+
+	table.sort(dirts, function(a, b)
+		local aNum = tonumber(a.Parent and a.Parent.Name:match("%d+")) or 0
+		local bNum = tonumber(b.Parent and b.Parent.Name:match("%d+")) or 0
+
+		return aNum < bNum
+	end)
+
+	FarmDirtCache = dirts
+	FarmDirtCachePlot = plot
+	FarmDirtCacheTime = now
+
+	return dirts
+end
+
+local function isPlantedDirt(dirt)
+	if not dirt then
+		return false
+	end
+
+	local plantName = dirt:GetAttribute("PlantName")
+
+	return type(plantName) == "string" and plantName ~= ""
+end
+
+local function getPlantLevel(dirt)
+	return math.max(0, math.floor(tonumber(dirt and dirt:GetAttribute("PlantLevel")) or 0))
 end
 
 local function getMyGearStockFolder()
@@ -1469,6 +1555,96 @@ local function compostSelectedSeedsOnce(quiet)
 	return composted
 end
 
+local function upgradePlantsOnce(quiet)
+	local remote = getUpgradePlantRemote()
+	local dirts = getFarmDirts(false)
+	local targetLevel = math.max(1, math.floor(tonumber(State.PlantUpgradeTargetLevel) or 1))
+	local upgraded = 0
+	local skipped = 0
+
+	if not remote then
+		consoleWarn("[PLOT] UpgradePlant remote not found.")
+		return 0
+	end
+
+	for _, dirt in ipairs(dirts) do
+		if ENV.Stop then
+			break
+		end
+
+		if isPlantedDirt(dirt) then
+			local level = getPlantLevel(dirt)
+
+			if level < targetLevel then
+				local ok, err = pcall(function()
+					return remote:InvokeServer(dirt)
+				end)
+
+				if ok then
+					upgraded += 1
+				else
+					consoleWarn("[PLOT UPGRADE FAILED]", dirt:GetFullName(), err)
+				end
+
+				task.wait(PlantUpgradeItemDelay)
+			else
+				skipped += 1
+			end
+		end
+	end
+
+	if not quiet then
+		OrionLib:MakeNotification({
+			Name = "Plant Upgrade Pass",
+			Content = "Upgraded " .. tostring(upgraded) .. " plants. Skipped " .. tostring(skipped) .. " at target.",
+			Time = 3,
+		})
+	end
+
+	consolePrint("[PLOT UPGRADE] upgraded:", upgraded, "skipped:", skipped, "target:", targetLevel)
+	return upgraded
+end
+
+local function removeAllPlants()
+	local remote = getRemovePlantRemote()
+	local dirts = getFarmDirts(true)
+	local removed = 0
+
+	if not remote then
+		consoleWarn("[PLOT] RemovePlant remote not found.")
+		return 0
+	end
+
+	for _, dirt in ipairs(dirts) do
+		if ENV.Stop then
+			break
+		end
+
+		if isPlantedDirt(dirt) then
+			local ok, err = pcall(function()
+				remote:FireServer(dirt)
+			end)
+
+			if ok then
+				removed += 1
+			else
+				consoleWarn("[PLOT REMOVE FAILED]", dirt:GetFullName(), err)
+			end
+
+			task.wait(PlantUpgradeItemDelay)
+		end
+	end
+
+	OrionLib:MakeNotification({
+		Name = "Remove Plants",
+		Content = "Remove request sent for " .. tostring(removed) .. " plants.",
+		Time = 3,
+	})
+
+	consolePrint("[PLOT REMOVE] removed:", removed)
+	return removed
+end
+
 local function simulateActivity()
 	local camera = Workspace.CurrentCamera
 
@@ -1527,6 +1703,12 @@ local EggsTab = Window:MakeTab({
 local CompostTab = Window:MakeTab({
 	Name = "Compost",
 	Icon = "recycle",
+	PremiumOnly = false,
+})
+
+local PlotTab = Window:MakeTab({
+	Name = "Plot",
+	Icon = "sprout",
 	PremiumOnly = false,
 })
 
@@ -1992,6 +2174,66 @@ CompostTab:AddSlider({
 	end,
 })
 
+--// PLOT TAB
+
+PlotTab:AddSection({
+	Name = "Plant Upgrades",
+})
+
+PlotTab:AddSlider({
+	Name = "Target Plant Level",
+	Min = 1,
+	Max = 100,
+	Default = State.PlantUpgradeTargetLevel,
+	Increment = 1,
+	ValueName = "level",
+	Callback = function(value)
+		State.PlantUpgradeTargetLevel = value
+		saveConfig()
+	end,
+})
+
+PlotTab:AddButton({
+	Name = "Upgrade Plants Once",
+	Callback = function()
+		upgradePlantsOnce(false)
+	end,
+})
+
+PlotTab:AddToggle({
+	Name = "Auto Upgrade Plants",
+	Default = State.AutoUpgradePlants,
+	Callback = function(value)
+		State.AutoUpgradePlants = value
+		saveConfig()
+		consolePrint("[TOGGLE] Auto Upgrade Plants:", value)
+	end,
+})
+
+PlotTab:AddSlider({
+	Name = "Upgrade Pass Delay",
+	Min = 1,
+	Max = 120,
+	Default = State.PlantUpgradeDelay,
+	Increment = 1,
+	ValueName = "sec",
+	Callback = function(value)
+		State.PlantUpgradeDelay = value
+		saveConfig()
+	end,
+})
+
+PlotTab:AddSection({
+	Name = "Plant Removal",
+})
+
+PlotTab:AddButton({
+	Name = "Remove All Plants",
+	Callback = function()
+		removeAllPlants()
+	end,
+})
+
 --// AUTO BUY TAB
 
 AutoBuyTab:AddSection({
@@ -2287,6 +2529,17 @@ task.spawn(function()
 		if State.AutoCompost then
 			compostSelectedSeedsOnce(true)
 			task.wait(math.max(1, State.CompostDelay))
+		else
+			task.wait(0.25)
+		end
+	end
+end)
+
+task.spawn(function()
+	while not ENV.Stop do
+		if State.AutoUpgradePlants then
+			upgradePlantsOnce(true)
+			task.wait(math.max(1, State.PlantUpgradeDelay))
 		else
 			task.wait(0.25)
 		end
