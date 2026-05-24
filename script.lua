@@ -60,7 +60,7 @@ local State = {
 	WebhookSeedPurchases = true,
 	WebhookExpensiveGear = true,
 	ExpensiveThreshold = 10000000000,
-	ExpensiveThresholdOption = "10B"
+	ExpensiveThresholdOption = "10B",
 }
 
 local SeedOptionMap = {}
@@ -95,6 +95,20 @@ local SeedRarityColors = {
 	Transcended = 65535, -- cyan
 	Unknown = 8421504, -- gray
 }
+
+local ConsoleOutput = false
+
+local function consolePrint(...)
+	if ConsoleOutput then
+		print(...)
+	end
+end
+
+local function consoleWarn(...)
+	if ConsoleOutput then
+		warn(...)
+	end
+end
 
 local function getSafeDropdownDefault(options, savedValue, fallback)
 	for _, option in ipairs(options) do
@@ -269,7 +283,7 @@ local function saveConfig(force)
 	end
 
 	if not canUseFileConfig() then
-		warn("[CONFIG] File config functions are not available.")
+		consoleWarn("[CONFIG] File config functions are not available.")
 		return
 	end
 
@@ -278,7 +292,7 @@ local function saveConfig(force)
 	end)
 
 	if not ok then
-		warn("[CONFIG] Save failed:", err)
+		consoleWarn("[CONFIG] Save failed:", err)
 	end
 end
 
@@ -292,7 +306,7 @@ local function loadConfig()
 	end)
 
 	if not ok or type(data) ~= "table" then
-		warn("[CONFIG] Load failed:", data)
+		consoleWarn("[CONFIG] Load failed:", data)
 		return
 	end
 
@@ -589,7 +603,7 @@ local function getMyGearStockFolder()
 	GearStocksFolder = GearStocksFolder or ReplicatedStorage:FindFirstChild("GearStocks")
 
 	if not GearStocksFolder then
-		warn("[GEAR STOCK] ReplicatedStorage.GearStocks was not found.")
+		consoleWarn("[GEAR STOCK] ReplicatedStorage.GearStocks was not found.")
 		return nil
 	end
 
@@ -603,8 +617,7 @@ local function getMyGearStockFolder()
 		end
 	end
 
-	return GearStocksFolder:FindFirstChild(LocalPlayer.Name)
-		or GearStocksFolder:FindFirstChild(LocalPlayer.DisplayName)
+	return GearStocksFolder:FindFirstChild(LocalPlayer.Name) or GearStocksFolder:FindFirstChild(LocalPlayer.DisplayName)
 end
 
 local function getGearStockAmount(stockFolder, gearName)
@@ -721,7 +734,7 @@ end
 
 local function sendWebhook(title, description, fields, color)
 	if State.WebhookURL == "" then
-		warn("[Webhook] No webhook URL set.")
+		consoleWarn("[Webhook] No webhook URL set.")
 		return
 	end
 
@@ -759,7 +772,7 @@ local function sendWebhook(title, description, fields, color)
 		end)
 
 		if not ok then
-			warn("[Webhook] Request failed:", err)
+			consoleWarn("[Webhook] Request failed:", err)
 		end
 	else
 		local ok, err = pcall(function()
@@ -767,7 +780,7 @@ local function sendWebhook(title, description, fields, color)
 		end)
 
 		if not ok then
-			warn("[Webhook] HttpService failed:", err)
+			consoleWarn("[Webhook] HttpService failed:", err)
 		end
 	end
 end
@@ -843,7 +856,7 @@ local function buySeedSlot(seed, deferWebhook)
 	end)
 
 	if ok then
-		print("[SEED BUY]", seed.Name, "slot:", seed.Slot, "price:", seed.CostText, "rarity:", seed.Rarity)
+		consolePrint("[SEED BUY]", seed.Name, "slot:", seed.Slot, "price:", seed.CostText, "rarity:", seed.Rarity)
 
 		if deferWebhook then
 			task.spawn(function()
@@ -855,7 +868,7 @@ local function buySeedSlot(seed, deferWebhook)
 
 		return true
 	else
-		warn("[SEED BUY FAILED]", seed.Name, err)
+		consoleWarn("[SEED BUY FAILED]", seed.Name, err)
 		return false
 	end
 end
@@ -887,15 +900,15 @@ local function rollSeeds()
 	end)
 
 	if ok then
-		print("[ROLL] Rolled seeds")
+		consolePrint("[ROLL] Rolled seeds")
 	else
-		warn("[ROLL FAILED]", err)
+		consoleWarn("[ROLL FAILED]", err)
 	end
 end
 
 local function buyGear(gearName, quiet)
 	if not GearTransaction then
-		warn("[GEAR] Gear transaction remote not found.")
+		consoleWarn("[GEAR] Gear transaction remote not found.")
 		return false
 	end
 
@@ -916,13 +929,13 @@ local function buyGear(gearName, quiet)
 
 	if ok then
 		if not quiet then
-			print("[GEAR BUY]", gearName, "price:", priceText, "result:", result)
+			consolePrint("[GEAR BUY]", gearName, "price:", priceText, "result:", result)
 		end
 
 		sendGearWebhook(gearName, price, priceText)
 		return true
 	else
-		warn("[GEAR BUY FAILED]", gearName, result)
+		consoleWarn("[GEAR BUY FAILED]", gearName, result)
 		return false
 	end
 end
@@ -934,7 +947,7 @@ local function buyAllGearOnce()
 	local attempted = 0
 
 	if not stockFolder then
-		warn("[GEAR STOCK] Could not find your gear stock folder.")
+		consoleWarn("[GEAR STOCK] Could not find your gear stock folder.")
 		return
 	end
 
@@ -966,7 +979,7 @@ local function buyAllGearOnce()
 		end
 	end
 
-	print(
+	consolePrint(
 		"[GEAR BUY] Finished stock pass. Folder:",
 		stockFolder.Name,
 		"attempted:",
@@ -982,9 +995,9 @@ local function sellCrates()
 	end)
 
 	if ok then
-		print("[SELL] Sold crates")
+		consolePrint("[SELL] Sold crates")
 	else
-		warn("[SELL FAILED]", err)
+		consoleWarn("[SELL FAILED]", err)
 	end
 end
 
@@ -1143,7 +1156,7 @@ SeedsTab:AddToggle({
 	Callback = function(value)
 		State.AutoBuySelectedSeedRarities = value
 		saveConfig()
-		print("[TOGGLE] Auto Buy Selected Seed Rarities:", value)
+		consolePrint("[TOGGLE] Auto Buy Selected Seed Rarities:", value)
 	end,
 })
 
@@ -1198,7 +1211,7 @@ SeedsTab:AddToggle({
 	Callback = function(value)
 		State.AutoBuySelectedSeeds = value
 		saveConfig()
-		print("[TOGGLE] Auto Buy Selected Seeds:", value)
+		consolePrint("[TOGGLE] Auto Buy Selected Seeds:", value)
 	end,
 })
 
@@ -1208,7 +1221,7 @@ SeedsTab:AddToggle({
 	Callback = function(value)
 		State.AutoRoll = value
 		saveConfig()
-		print("[TOGGLE] Auto Roll:", value)
+		consolePrint("[TOGGLE] Auto Roll:", value)
 	end,
 })
 
@@ -1231,7 +1244,7 @@ AutoBuyTab:AddToggle({
 	Callback = function(value)
 		State.AutoBuyAllGear = value
 		saveConfig()
-		print("[TOGGLE] Auto Buy Everything:", value)
+		consolePrint("[TOGGLE] Auto Buy Everything:", value)
 	end,
 })
 
@@ -1258,7 +1271,7 @@ AutoBuyTab:AddToggle({
 	Callback = function(value)
 		State.AutoSell = value
 		saveConfig()
-		print("[TOGGLE] Auto Sell:", value)
+		consolePrint("[TOGGLE] Auto Sell:", value)
 	end,
 })
 
@@ -1309,7 +1322,7 @@ SettingsTab:AddTextbox({
 	Callback = function(value)
 		State.WebhookURL = trim(value)
 		saveConfig()
-		print("[WEBHOOK] URL updated.")
+		consolePrint("[WEBHOOK] URL updated.")
 	end,
 })
 
@@ -1391,10 +1404,10 @@ SettingsTab:AddButton({
 	Callback = function()
 		local seeds = scanCurrentPlotSeeds()
 
-		print("========== CURRENT PLOT SEEDS ==========")
+		consolePrint("========== CURRENT PLOT SEEDS ==========")
 
 		for _, seed in ipairs(seeds) do
-			print(
+			consolePrint(
 				"Slot "
 					.. seed.Slot
 					.. " = "
@@ -1408,7 +1421,7 @@ SettingsTab:AddButton({
 			)
 		end
 
-		print("========================================")
+		consolePrint("========================================")
 	end,
 })
 
