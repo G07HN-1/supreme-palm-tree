@@ -1,0 +1,1479 @@
+--// Fortune Seed / Shop UI - Orion Version
+--// Use only where you are allowed to run client-side automation.
+
+if getgenv().FortuneSeedUI then
+	getgenv().FortuneSeedUI.Stop = true
+	task.wait(0.5)
+end
+
+getgenv().FortuneSeedUI = {
+	Stop = false,
+}
+
+local ENV = getgenv().FortuneSeedUI
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local HttpService = game:GetService("HttpService")
+
+local LocalPlayer = Players.LocalPlayer
+
+local Remotes = ReplicatedStorage:WaitForChild("Remotes")
+local RollSeedsRemote = Remotes:WaitForChild("RollSeeds")
+local BuySeedRemote = Remotes:WaitForChild("BuySeed")
+local SellCratesRemote = Remotes:WaitForChild("SellCrates")
+
+local GearRemote = Remotes:FindFirstChild("Gear")
+local GearTransaction = GearRemote and GearRemote:FindFirstChild("Transaction")
+
+local Assets = ReplicatedStorage:WaitForChild("Assets")
+local SeedsFolder = Assets:WaitForChild("Seeds")
+local GearFolder = Assets:WaitForChild("Gear")
+local GearStocksFolder = ReplicatedStorage:FindFirstChild("GearStocks")
+	or ReplicatedStorage:WaitForChild("GearStocks", 5)
+
+local OrionURL = "https://raw.githubusercontent.com/GhostDuckyy/UI-Libraries/refs/heads/main/Orion/source.lua"
+
+local OrionLib = loadstring(game:HttpGet(OrionURL))()
+
+--// SETTINGS
+
+local State = {
+	AutoRoll = false,
+	AutoBuySelectedSeeds = false,
+	AutoBuySelectedSeedRarities = false,
+
+	AutoBuyAllGear = false,
+	AutoSell = false,
+
+	SelectedSeedOption = nil,
+	SelectedSeeds = {},
+	SelectedSeedRarityOption = nil,
+	SelectedSeedRarities = {},
+
+	SaveConfigEnabled = false,
+	RollDelay = 1.25,
+	GearDelay = 30,
+	SellDelay = 15,
+
+	WebhookURL = "",
+	WebhookSeedPurchases = true,
+	WebhookExpensiveGear = true,
+	ExpensiveThreshold = 10000000000,
+	ExpensiveThresholdOption = "10B"
+}
+
+local SeedOptionMap = {}
+local GearNamesCache = nil
+local GearPriceCache = {}
+local GearBuyItemDelay = 0.2
+
+local SeedRarityOptions = {
+	"Select Rarity",
+	"Common",
+	"Uncommon",
+	"Rare",
+	"Epic",
+	"Legendary",
+	"Secret",
+	"Prismatic",
+	"Divine",
+	"Exotic",
+	"Transcended",
+}
+
+local SeedRarityColors = {
+	Common = 16777215, -- white
+	Uncommon = 5763719, -- green
+	Rare = 3447003, -- blue
+	Epic = 10181046, -- purple
+	Legendary = 16753920, -- gold
+	Secret = 16711680, -- red
+	Prismatic = 16711935, -- pink
+	Divine = 16776960, -- yellow
+	Exotic = 16744192, -- orange
+	Transcended = 65535, -- cyan
+	Unknown = 8421504, -- gray
+}
+
+local function getSafeDropdownDefault(options, savedValue, fallback)
+	for _, option in ipairs(options) do
+		if option == savedValue then
+			return savedValue
+		end
+	end
+
+	return fallback
+end
+
+--// PRICE UTILS
+
+local function trim(str)
+	return tostring(str or ""):gsub("^%s+", ""):gsub("%s+$", "")
+end
+
+local function parsePrice(text)
+	text = tostring(text or ""):lower()
+	text = text:gsub(",", "")
+	text = text:gsub("%$", "")
+	text = text:gsub("%s+", "")
+
+	local number, suffix = text:match("([%d%.]+)(%a*)")
+	number = tonumber(number)
+
+	if not number then
+		return 0
+	end
+
+	local mult = 1
+
+	if suffix == "k" then
+		mult = 1e3
+	elseif suffix == "m" then
+		mult = 1e6
+	elseif suffix == "b" then
+		mult = 1e9
+	elseif suffix == "t" then
+		mult = 1e12
+	elseif suffix == "qa" or suffix == "q" then
+		mult = 1e15
+	end
+
+	return number * mult
+end
+
+local function formatPrice(value)
+	value = tonumber(value) or 0
+
+	local units = {
+		{ 1e15, "Qa" },
+		{ 1e12, "T" },
+		{ 1e9, "B" },
+		{ 1e6, "M" },
+		{ 1e3, "K" },
+	}
+
+	for _, unit in ipairs(units) do
+		local amount, suffix = unit[1], unit[2]
+
+		if value >= amount then
+			local num = value / amount
+
+			if num >= 100 then
+				return "$" .. string.format("%.0f", num) .. suffix
+			elseif num >= 10 then
+				return "$" .. string.format("%.1f", num):gsub("%.0", "") .. suffix
+			else
+				return "$" .. string.format("%.2f", num):gsub("0$", ""):gsub("%.$", "") .. suffix
+			end
+		end
+	end
+
+	return "$" .. tostring(math.floor(value))
+end
+
+--// CONFIG
+
+local ConfigFileName = "FortuneAutoTool_Config_" .. tostring(LocalPlayer.UserId) .. ".json"
+
+local function canUseFileConfig()
+	return typeof(readfile) == "function" and typeof(writefile) == "function" and typeof(isfile) == "function"
+end
+
+local function getSelectedSeedList()
+	local names = {}
+
+	for name, enabled in pairs(State.SelectedSeeds) do
+		if enabled then
+			table.insert(names, name)
+		end
+	end
+
+	table.sort(names)
+
+	return names
+end
+
+local function applySelectedSeeds(savedSeeds)
+	State.SelectedSeeds = {}
+
+	if type(savedSeeds) ~= "table" then
+		return
+	end
+
+	for key, value in pairs(savedSeeds) do
+		if type(key) == "number" and type(value) == "string" then
+			State.SelectedSeeds[value] = true
+		elseif type(key) == "string" and value then
+			State.SelectedSeeds[key] = true
+		end
+	end
+end
+
+local function getSelectedSeedRarityList()
+	local rarities = {}
+
+	for rarity, enabled in pairs(State.SelectedSeedRarities) do
+		if enabled then
+			table.insert(rarities, rarity)
+		end
+	end
+
+	table.sort(rarities)
+
+	return rarities
+end
+
+local function applySelectedSeedRarities(savedRarities)
+	State.SelectedSeedRarities = {}
+
+	if type(savedRarities) ~= "table" then
+		return
+	end
+
+	for key, value in pairs(savedRarities) do
+		if type(key) == "number" and type(value) == "string" then
+			State.SelectedSeedRarities[value] = true
+		elseif type(key) == "string" and value then
+			State.SelectedSeedRarities[key] = true
+		end
+	end
+end
+
+local function getConfigData()
+	return {
+		SaveConfigEnabled = State.SaveConfigEnabled,
+		AutoRoll = State.AutoRoll,
+		AutoBuySelectedSeeds = State.AutoBuySelectedSeeds,
+		AutoBuySelectedSeedRarities = State.AutoBuySelectedSeedRarities,
+		AutoBuyAllGear = State.AutoBuyAllGear,
+		AutoSell = State.AutoSell,
+		SelectedSeedOption = State.SelectedSeedOption,
+		SelectedSeeds = getSelectedSeedList(),
+		SelectedSeedRarityOption = State.SelectedSeedRarityOption,
+		SelectedSeedRarities = getSelectedSeedRarityList(),
+		RollDelay = State.RollDelay,
+		GearDelay = State.GearDelay,
+		SellDelay = State.SellDelay,
+		WebhookURL = State.WebhookURL,
+		WebhookSeedPurchases = State.WebhookSeedPurchases,
+		WebhookExpensiveGear = State.WebhookExpensiveGear,
+		ExpensiveThreshold = State.ExpensiveThreshold,
+		ExpensiveThresholdOption = State.ExpensiveThresholdOption,
+	}
+end
+
+local function saveConfig(force)
+	if not force and not State.SaveConfigEnabled then
+		return
+	end
+
+	if not canUseFileConfig() then
+		warn("[CONFIG] File config functions are not available.")
+		return
+	end
+
+	local ok, err = pcall(function()
+		writefile(ConfigFileName, HttpService:JSONEncode(getConfigData()))
+	end)
+
+	if not ok then
+		warn("[CONFIG] Save failed:", err)
+	end
+end
+
+local function loadConfig()
+	if not canUseFileConfig() or not isfile(ConfigFileName) then
+		return
+	end
+
+	local ok, data = pcall(function()
+		return HttpService:JSONDecode(readfile(ConfigFileName))
+	end)
+
+	if not ok or type(data) ~= "table" then
+		warn("[CONFIG] Load failed:", data)
+		return
+	end
+
+	if data.SaveConfigEnabled ~= true then
+		State.SaveConfigEnabled = false
+		return
+	end
+
+	for _, key in ipairs({
+		"SaveConfigEnabled",
+		"AutoRoll",
+		"AutoBuySelectedSeeds",
+		"AutoBuySelectedSeedRarities",
+		"AutoBuyAllGear",
+		"AutoSell",
+		"WebhookSeedPurchases",
+		"WebhookExpensiveGear",
+	}) do
+		if type(data[key]) == "boolean" then
+			State[key] = data[key]
+		end
+	end
+
+	for _, key in ipairs({
+		"RollDelay",
+		"GearDelay",
+		"SellDelay",
+		"ExpensiveThreshold",
+	}) do
+		if type(data[key]) == "number" then
+			State[key] = data[key]
+		end
+	end
+
+	if type(data.WebhookURL) == "string" then
+		State.WebhookURL = data.WebhookURL
+	end
+
+	if type(data.SelectedSeedOption) == "string" then
+		State.SelectedSeedOption = data.SelectedSeedOption
+	end
+
+	if type(data.SelectedSeedRarityOption) == "string" then
+		State.SelectedSeedRarityOption = data.SelectedSeedRarityOption
+	end
+
+	if type(data.ExpensiveThresholdOption) == "string" then
+		State.ExpensiveThresholdOption = data.ExpensiveThresholdOption
+		State.ExpensiveThreshold = parsePrice(data.ExpensiveThresholdOption)
+	end
+
+	applySelectedSeeds(data.SelectedSeeds)
+	applySelectedSeedRarities(data.SelectedSeedRarities)
+end
+
+--// BASIC INSTANCE UTILS
+
+local function getText(obj)
+	if not obj then
+		return "Unknown"
+	end
+
+	local okContent, content = pcall(function()
+		return obj.ContentText
+	end)
+
+	if okContent and content and content ~= "" then
+		return content
+	end
+
+	local okText, text = pcall(function()
+		return obj.Text
+	end)
+
+	if okText and text and text ~= "" then
+		return text
+	end
+
+	return "Unknown"
+end
+
+local function getPos(obj)
+	if not obj then
+		return nil
+	end
+
+	if obj:IsA("Attachment") then
+		return obj.WorldPosition
+	end
+
+	if obj:IsA("BasePart") then
+		return obj.Position
+	end
+
+	if obj:IsA("Model") then
+		return obj:GetPivot().Position
+	end
+
+	if obj:IsA("BillboardGui") or obj:IsA("SurfaceGui") then
+		return getPos(obj.Adornee or obj.Parent)
+	end
+
+	return getPos(obj.Parent)
+end
+
+local function getTopWorkspaceObject(obj)
+	local current = obj
+
+	while current and current.Parent and current.Parent ~= workspace do
+		current = current.Parent
+	end
+
+	return current
+end
+
+--// PLOT + SEED SCANNER
+
+local function findMyPlot()
+	local plots = workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("Plots")
+	if not plots then
+		return nil
+	end
+
+	for _, plot in ipairs(plots:GetChildren()) do
+		local ownerSign = plot:FindFirstChild("OwnerSign", true)
+
+		if ownerSign then
+			for _, obj in ipairs(ownerSign:GetDescendants()) do
+				if obj:IsA("TextLabel") or obj:IsA("TextButton") then
+					local owner = getText(obj)
+
+					if owner == LocalPlayer.DisplayName or owner == LocalPlayer.Name then
+						return plot
+					end
+				end
+			end
+		end
+	end
+
+	return nil
+end
+
+local function getSlots(plot)
+	local seedRoller = plot and plot:FindFirstChild("SeedRoller", true)
+	local slots = {}
+
+	if not seedRoller then
+		return slots
+	end
+
+	for i = 1, 6 do
+		local slotObj = seedRoller:FindFirstChild("Seed" .. i)
+		local pos = getPos(slotObj)
+
+		if pos then
+			table.insert(slots, {
+				Slot = i,
+				Position = pos,
+			})
+		end
+	end
+
+	return slots
+end
+
+local function getSeedInfoFromGui(gui)
+	local top = getTopWorkspaceObject(gui)
+	local infoFrame = gui:FindFirstChild("Frame") and gui.Frame:FindFirstChild("InfoFrame")
+
+	local name = top and top.Name or "Unknown"
+	local rarity = "Unknown"
+	local costText = "Unknown"
+	local price = 0
+
+	if infoFrame then
+		local rarityObj = infoFrame:FindFirstChild("Rarity")
+		local costObj = infoFrame:FindFirstChild("Cost")
+
+		rarity = getText(rarityObj)
+		costText = getText(costObj)
+		price = parsePrice(costText)
+	end
+
+	return {
+		Name = name,
+		Rarity = rarity,
+		CostText = costText,
+		Price = price,
+		Position = getPos(gui),
+		Gui = gui,
+	}
+end
+
+local function getAllSeedGuis()
+	local found = {}
+
+	for _, obj in ipairs(workspace:GetDescendants()) do
+		if obj.Name == "SeedGui" then
+			local info = getSeedInfoFromGui(obj)
+
+			if info.Position then
+				table.insert(found, info)
+			end
+		end
+	end
+
+	return found
+end
+
+local function findClosestSeed(slot, seeds, used)
+	local best = nil
+	local bestIndex = nil
+	local bestDist = math.huge
+
+	for index, seed in ipairs(seeds) do
+		if not used[index] then
+			local dist = (slot.Position - seed.Position).Magnitude
+
+			if dist < bestDist then
+				best = seed
+				bestIndex = index
+				bestDist = dist
+			end
+		end
+	end
+
+	return best, bestIndex, bestDist
+end
+
+local function scanCurrentPlotSeeds()
+	local plot = findMyPlot()
+	local slots = getSlots(plot)
+	local seeds = getAllSeedGuis()
+	local used = {}
+	local results = {}
+
+	for _, slot in ipairs(slots) do
+		local seed, index, dist = findClosestSeed(slot, seeds, used)
+
+		if seed then
+			used[index] = true
+
+			table.insert(results, {
+				Slot = slot.Slot,
+				Name = seed.Name,
+				Rarity = seed.Rarity,
+				CostText = seed.CostText,
+				Price = seed.Price,
+				Distance = dist,
+				Gui = seed.Gui,
+			})
+		end
+	end
+
+	table.sort(results, function(a, b)
+		return a.Slot < b.Slot
+	end)
+
+	return results, plot
+end
+
+--// GEAR
+
+local function getSeedNames()
+	local names = {}
+
+	for _, seed in ipairs(SeedsFolder:GetChildren()) do
+		table.insert(names, seed.Name)
+	end
+
+	table.sort(names)
+
+	return names
+end
+
+local function getGearNames(forceRefresh)
+	if GearNamesCache and not forceRefresh then
+		return GearNamesCache
+	end
+
+	local names = {}
+
+	for _, item in ipairs(GearFolder:GetChildren()) do
+		table.insert(names, item.Name)
+	end
+
+	table.sort(names)
+	GearNamesCache = names
+
+	return names
+end
+
+local function getMyGearStockFolder()
+	GearStocksFolder = GearStocksFolder or ReplicatedStorage:FindFirstChild("GearStocks")
+
+	if not GearStocksFolder then
+		warn("[GEAR STOCK] ReplicatedStorage.GearStocks was not found.")
+		return nil
+	end
+
+	local plot = findMyPlot()
+
+	if plot then
+		local stockFolder = GearStocksFolder:FindFirstChild(plot.Name)
+
+		if stockFolder then
+			return stockFolder
+		end
+	end
+
+	return GearStocksFolder:FindFirstChild(LocalPlayer.Name)
+		or GearStocksFolder:FindFirstChild(LocalPlayer.DisplayName)
+end
+
+local function getGearStockAmount(stockFolder, gearName)
+	local stockValue = stockFolder and stockFolder:FindFirstChild(gearName)
+
+	if not stockValue then
+		return 0
+	end
+
+	local ok, value = pcall(function()
+		return stockValue.Value
+	end)
+
+	if not ok then
+		return 0
+	end
+
+	return math.max(0, math.floor(tonumber(value) or 0)), stockValue
+end
+
+local function readGearPriceValue(value)
+	if type(value) == "number" then
+		return value, formatPrice(value)
+	end
+
+	if type(value) == "string" then
+		return parsePrice(value), value
+	end
+
+	return 0, "Unknown"
+end
+
+local function getGearAssetPrice(gearName)
+	if GearPriceCache[gearName] then
+		return GearPriceCache[gearName].Price, GearPriceCache[gearName].PriceText
+	end
+
+	local gear = GearFolder:FindFirstChild(gearName)
+	local price = 0
+	local priceText = "Unknown"
+
+	if gear then
+		for _, attrName in ipairs({ "Price", "Cost", "Value" }) do
+			local attrValue = gear:GetAttribute(attrName)
+
+			if attrValue ~= nil then
+				price, priceText = readGearPriceValue(attrValue)
+				break
+			end
+		end
+
+		if price <= 0 then
+			for _, obj in ipairs(gear:GetDescendants()) do
+				local lowerName = string.lower(obj.Name)
+
+				if lowerName == "price" or lowerName == "cost" or lowerName == "value" then
+					if obj:IsA("NumberValue") or obj:IsA("IntValue") then
+						price, priceText = readGearPriceValue(obj.Value)
+						break
+					elseif obj:IsA("StringValue") then
+						price, priceText = readGearPriceValue(obj.Value)
+						break
+					end
+				end
+			end
+		end
+	end
+
+	GearPriceCache[gearName] = {
+		Price = price,
+		PriceText = priceText,
+	}
+
+	return price, priceText
+end
+
+local function normalizeSeedRarity(rawRarity)
+	local text = trim(rawRarity or "")
+
+	if text == "" then
+		return "Unknown"
+	end
+
+	local lower = string.lower(text)
+
+	for index = 2, #SeedRarityOptions do
+		local rarity = SeedRarityOptions[index]
+
+		if lower == string.lower(rarity) then
+			return rarity
+		end
+	end
+
+	for index = #SeedRarityOptions, 2, -1 do
+		local rarity = SeedRarityOptions[index]
+
+		if lower:find(string.lower(rarity), 1, true) then
+			return rarity
+		end
+	end
+
+	return text
+end
+
+local function getSeedRarityColor(rarity)
+	return SeedRarityColors[normalizeSeedRarity(rarity)] or SeedRarityColors.Unknown
+end
+
+--// DISCORD WEBHOOK
+
+local function getRequestFunction()
+	return request or http_request or http and http.request or syn and syn.request
+end
+
+local function sendWebhook(title, description, fields, color)
+	if State.WebhookURL == "" then
+		warn("[Webhook] No webhook URL set.")
+		return
+	end
+
+	local req = getRequestFunction()
+
+	local embed = {
+		title = title,
+		description = description,
+		color = color or 65280,
+		fields = fields or {},
+		footer = {
+			text = "Fortune Seed Tool",
+		},
+		timestamp = DateTime.now():ToIsoDate(),
+	}
+
+	local payload = {
+		username = "Fortune Seed Tool",
+		avatar_url = "https://tr.rbxcdn.com/30DAY-AvatarHeadshot-420-420-Png/noFilter",
+		embeds = { embed },
+	}
+
+	local body = HttpService:JSONEncode(payload)
+
+	if req then
+		local ok, err = pcall(function()
+			req({
+				Url = State.WebhookURL,
+				Method = "POST",
+				Headers = {
+					["Content-Type"] = "application/json",
+				},
+				Body = body,
+			})
+		end)
+
+		if not ok then
+			warn("[Webhook] Request failed:", err)
+		end
+	else
+		local ok, err = pcall(function()
+			HttpService:PostAsync(State.WebhookURL, body, Enum.HttpContentType.ApplicationJson)
+		end)
+
+		if not ok then
+			warn("[Webhook] HttpService failed:", err)
+		end
+	end
+end
+
+local function sendSeedWebhook(seed)
+	if not State.WebhookSeedPurchases then
+		return
+	end
+
+	local rarity = normalizeSeedRarity(seed.Rarity)
+
+	sendWebhook("🌱 Selected Seed Purchased", "Auto-buy bought a selected seed before rolling again.", {
+		{
+			name = "Seed",
+			value = seed.Name,
+			inline = true,
+		},
+		{
+			name = "Slot",
+			value = tostring(seed.Slot),
+			inline = true,
+		},
+		{
+			name = "Rarity",
+			value = rarity,
+			inline = true,
+		},
+		{
+			name = "Price",
+			value = formatPrice(seed.Price) .. " `" .. seed.CostText .. "`",
+			inline = true,
+		},
+	}, getSeedRarityColor(rarity))
+end
+
+local function sendGearWebhook(gearName, price, priceText)
+	if not State.WebhookExpensiveGear then
+		return
+	end
+
+	if price < State.ExpensiveThreshold then
+		return
+	end
+
+	sendWebhook("🛒 Expensive Gear Purchased", "Auto-buy purchased gear at or above your expensive threshold.", {
+		{
+			name = "Gear",
+			value = gearName,
+			inline = true,
+		},
+		{
+			name = "Price",
+			value = formatPrice(price) .. " `" .. priceText .. "`",
+			inline = true,
+		},
+		{
+			name = "Threshold",
+			value = formatPrice(State.ExpensiveThreshold),
+			inline = true,
+		},
+	}, 16753920)
+end
+
+local function shouldCheckGearPrices()
+	return State.WebhookExpensiveGear and State.WebhookURL ~= ""
+end
+
+--// BUY FUNCTIONS
+
+local function buySeedSlot(seed, deferWebhook)
+	local ok, err = pcall(function()
+		BuySeedRemote:FireServer(seed.Slot)
+	end)
+
+	if ok then
+		print("[SEED BUY]", seed.Name, "slot:", seed.Slot, "price:", seed.CostText, "rarity:", seed.Rarity)
+
+		if deferWebhook then
+			task.spawn(function()
+				sendSeedWebhook(seed)
+			end)
+		else
+			sendSeedWebhook(seed)
+		end
+
+		return true
+	else
+		warn("[SEED BUY FAILED]", seed.Name, err)
+		return false
+	end
+end
+
+local function buySelectedSeedsFromCurrentRoll()
+	local currentSeeds = scanCurrentPlotSeeds()
+	local seedsToBuy = {}
+
+	for _, seed in ipairs(currentSeeds) do
+		local rarity = normalizeSeedRarity(seed.Rarity)
+		local selectedByName = State.AutoBuySelectedSeeds and State.SelectedSeeds[seed.Name]
+		local selectedByRarity = State.AutoBuySelectedSeedRarities and State.SelectedSeedRarities[rarity]
+
+		if selectedByName or selectedByRarity then
+			table.insert(seedsToBuy, seed)
+		end
+	end
+
+	for _, seed in ipairs(seedsToBuy) do
+		buySeedSlot(seed, true)
+	end
+
+	return #seedsToBuy
+end
+
+local function rollSeeds()
+	local ok, err = pcall(function()
+		RollSeedsRemote:FireServer()
+	end)
+
+	if ok then
+		print("[ROLL] Rolled seeds")
+	else
+		warn("[ROLL FAILED]", err)
+	end
+end
+
+local function buyGear(gearName, quiet)
+	if not GearTransaction then
+		warn("[GEAR] Gear transaction remote not found.")
+		return false
+	end
+
+	if not gearName or gearName == "" or gearName == "None" then
+		return false
+	end
+
+	local price = 0
+	local priceText = "Unknown"
+
+	if shouldCheckGearPrices() then
+		price, priceText = getGearAssetPrice(gearName)
+	end
+
+	local ok, result = pcall(function()
+		return GearTransaction:InvokeServer(gearName)
+	end)
+
+	if ok then
+		if not quiet then
+			print("[GEAR BUY]", gearName, "price:", priceText, "result:", result)
+		end
+
+		sendGearWebhook(gearName, price, priceText)
+		return true
+	else
+		warn("[GEAR BUY FAILED]", gearName, result)
+		return false
+	end
+end
+
+local function buyAllGearOnce()
+	local gearNames = getGearNames()
+	local stockFolder = getMyGearStockFolder()
+	local bought = 0
+	local attempted = 0
+
+	if not stockFolder then
+		warn("[GEAR STOCK] Could not find your gear stock folder.")
+		return
+	end
+
+	for _, gearName in ipairs(gearNames) do
+		if ENV.Stop then
+			return
+		end
+
+		local stockAmount, stockValue = getGearStockAmount(stockFolder, gearName)
+
+		for _ = 1, stockAmount do
+			if ENV.Stop then
+				return
+			end
+
+			local currentStock = stockValue and tonumber(stockValue.Value) or 0
+
+			if currentStock < 1 then
+				break
+			end
+
+			attempted += 1
+
+			if buyGear(gearName, true) then
+				bought += 1
+			end
+
+			task.wait(GearBuyItemDelay)
+		end
+	end
+
+	print(
+		"[GEAR BUY] Finished stock pass. Folder:",
+		stockFolder.Name,
+		"attempted:",
+		tostring(attempted),
+		"successful calls:",
+		tostring(bought)
+	)
+end
+
+local function sellCrates()
+	local ok, err = pcall(function()
+		SellCratesRemote:FireServer()
+	end)
+
+	if ok then
+		print("[SELL] Sold crates")
+	else
+		warn("[SELL FAILED]", err)
+	end
+end
+
+loadConfig()
+
+--// UI
+
+local Window = OrionLib:MakeWindow({
+	Name = "Fortune Auto Tool",
+	HidePremium = true,
+	SaveConfig = false,
+	ConfigFolder = "FortuneAutoTool",
+	IntroEnabled = true,
+	IntroText = "Fortune Tool Loaded",
+})
+
+local SeedsTab = Window:MakeTab({
+	Name = "Seeds",
+	Icon = "leaf",
+	PremiumOnly = false,
+})
+
+local AutoBuyTab = Window:MakeTab({
+	Name = "Auto Buy",
+	Icon = "shopping-cart",
+	PremiumOnly = false,
+})
+
+local SettingsTab = Window:MakeTab({
+	Name = "Settings",
+	Icon = "settings",
+	PremiumOnly = false,
+})
+
+--// SEEDS TAB
+
+SeedsTab:AddSection({
+	Name = "Seed Roller",
+})
+
+local IsRefreshingSeedDropdown = false
+local SelectedSeedsLabel
+local updateSelectedSeedsLabel
+local SelectedSeedRaritiesLabel
+local updateSelectedSeedRaritiesLabel
+
+SelectedSeedsLabel = SeedsTab:AddParagraph("Selected Seeds", "None")
+
+function updateSelectedSeedsLabel()
+	if not SelectedSeedsLabel then
+		return
+	end
+
+	local names = getSelectedSeedList()
+
+	if #names == 0 then
+		SelectedSeedsLabel:Set("None")
+	else
+		SelectedSeedsLabel:Set(table.concat(names, ", "))
+	end
+end
+
+local SeedDropdown = SeedsTab:AddDropdown({
+	Name = "Seeds Dropdown",
+	Default = "Select Seed",
+	Options = {
+		"Select Seed",
+	},
+	Callback = function(value)
+		State.SelectedSeedOption = value
+
+		if IsRefreshingSeedDropdown then
+			return
+		end
+
+		local seedName = SeedOptionMap[value]
+
+		if not seedName then
+			return
+		end
+
+		State.SelectedSeeds[seedName] = true
+		updateSelectedSeedsLabel()
+		saveConfig()
+
+		OrionLib:MakeNotification({
+			Name = "Seed Selected",
+			Content = seedName .. " was added to selected seeds.",
+			Time = 3,
+		})
+	end,
+})
+
+SeedsTab:AddSection({
+	Name = "Seed Rarity Filter",
+})
+
+SelectedSeedRaritiesLabel = SeedsTab:AddParagraph("Selected Rarities", "None")
+
+function updateSelectedSeedRaritiesLabel()
+	if not SelectedSeedRaritiesLabel then
+		return
+	end
+
+	local rarities = getSelectedSeedRarityList()
+
+	if #rarities == 0 then
+		SelectedSeedRaritiesLabel:Set("None")
+	else
+		SelectedSeedRaritiesLabel:Set(table.concat(rarities, ", "))
+	end
+end
+
+SeedsTab:AddDropdown({
+	Name = "Rarity Selector",
+	Default = getSafeDropdownDefault(SeedRarityOptions, State.SelectedSeedRarityOption, "Select Rarity"),
+	Options = SeedRarityOptions,
+	Callback = function(value)
+		State.SelectedSeedRarityOption = value
+
+		if value == "Select Rarity" then
+			saveConfig()
+			return
+		end
+
+		State.SelectedSeedRarities[value] = true
+		updateSelectedSeedRaritiesLabel()
+		saveConfig()
+
+		OrionLib:MakeNotification({
+			Name = "Rarity Selected",
+			Content = value .. " seeds will be bought when rolled.",
+			Time = 3,
+		})
+	end,
+})
+
+SeedsTab:AddButton({
+	Name = "Clear Selected Rarities",
+	Callback = function()
+		table.clear(State.SelectedSeedRarities)
+		updateSelectedSeedRaritiesLabel()
+		saveConfig()
+
+		OrionLib:MakeNotification({
+			Name = "Cleared",
+			Content = "Selected seed rarities cleared.",
+			Time = 3,
+		})
+	end,
+})
+
+SeedsTab:AddToggle({
+	Name = "Auto Buy Selected Rarities",
+	Default = State.AutoBuySelectedSeedRarities,
+	Callback = function(value)
+		State.AutoBuySelectedSeedRarities = value
+		saveConfig()
+		print("[TOGGLE] Auto Buy Selected Seed Rarities:", value)
+	end,
+})
+
+local function refreshSeedDropdown()
+	local seedNames = getSeedNames()
+	local options = {
+		"Select Seed",
+	}
+	SeedOptionMap = {}
+
+	for _, seedName in ipairs(seedNames) do
+		table.insert(options, seedName)
+		SeedOptionMap[seedName] = seedName
+	end
+
+	if #seedNames == 0 then
+		options = {
+			"No Seeds Found",
+		}
+	end
+
+	IsRefreshingSeedDropdown = true
+	SeedDropdown:Refresh(options, true)
+	pcall(function()
+		if State.SelectedSeedOption and SeedOptionMap[State.SelectedSeedOption] then
+			SeedDropdown:Set(State.SelectedSeedOption)
+		else
+			SeedDropdown:Set("Select Seed")
+		end
+	end)
+	IsRefreshingSeedDropdown = false
+end
+
+SeedsTab:AddButton({
+	Name = "Clear Selected Seeds",
+	Callback = function()
+		table.clear(State.SelectedSeeds)
+		updateSelectedSeedsLabel()
+		saveConfig()
+
+		OrionLib:MakeNotification({
+			Name = "Cleared",
+			Content = "Selected seed list cleared.",
+			Time = 3,
+		})
+	end,
+})
+
+SeedsTab:AddToggle({
+	Name = "Auto Buy Selected Seeds",
+	Default = State.AutoBuySelectedSeeds,
+	Callback = function(value)
+		State.AutoBuySelectedSeeds = value
+		saveConfig()
+		print("[TOGGLE] Auto Buy Selected Seeds:", value)
+	end,
+})
+
+SeedsTab:AddToggle({
+	Name = "Auto Roll",
+	Default = State.AutoRoll,
+	Callback = function(value)
+		State.AutoRoll = value
+		saveConfig()
+		print("[TOGGLE] Auto Roll:", value)
+	end,
+})
+
+--// AUTO BUY TAB
+
+AutoBuyTab:AddSection({
+	Name = "Gear Shop",
+})
+
+AutoBuyTab:AddButton({
+	Name = "Buy Everything Once",
+	Callback = function()
+		buyAllGearOnce()
+	end,
+})
+
+AutoBuyTab:AddToggle({
+	Name = "Auto Buy Everything",
+	Default = State.AutoBuyAllGear,
+	Callback = function(value)
+		State.AutoBuyAllGear = value
+		saveConfig()
+		print("[TOGGLE] Auto Buy Everything:", value)
+	end,
+})
+
+AutoBuyTab:AddSlider({
+	Name = "Gear Buy Loop Delay",
+	Min = 1,
+	Max = 120,
+	Default = State.GearDelay,
+	Increment = 1,
+	ValueName = "sec",
+	Callback = function(value)
+		State.GearDelay = value
+		saveConfig()
+	end,
+})
+
+AutoBuyTab:AddSection({
+	Name = "Auto Sell",
+})
+
+AutoBuyTab:AddToggle({
+	Name = "Auto Sell",
+	Default = State.AutoSell,
+	Callback = function(value)
+		State.AutoSell = value
+		saveConfig()
+		print("[TOGGLE] Auto Sell:", value)
+	end,
+})
+
+AutoBuyTab:AddSlider({
+	Name = "Sell Loop Delay",
+	Min = 1,
+	Max = 120,
+	Default = State.SellDelay,
+	Increment = 1,
+	ValueName = "sec",
+	Callback = function(value)
+		State.SellDelay = value
+		saveConfig()
+	end,
+})
+
+--// SETTINGS TAB
+
+SettingsTab:AddSection({
+	Name = "Config",
+})
+
+SettingsTab:AddToggle({
+	Name = "Save Config",
+	Default = State.SaveConfigEnabled,
+	Callback = function(value)
+		State.SaveConfigEnabled = value
+		saveConfig(true)
+
+		if value and not canUseFileConfig() then
+			OrionLib:MakeNotification({
+				Name = "Config Unavailable",
+				Content = "This executor does not expose readfile/writefile config support.",
+				Time = 4,
+			})
+		end
+	end,
+})
+
+SettingsTab:AddSection({
+	Name = "Discord Webhook",
+})
+
+SettingsTab:AddTextbox({
+	Name = "Webhook URL",
+	Default = State.WebhookURL,
+	TextDisappear = false,
+	Callback = function(value)
+		State.WebhookURL = trim(value)
+		saveConfig()
+		print("[WEBHOOK] URL updated.")
+	end,
+})
+
+SettingsTab:AddToggle({
+	Name = "Webhook Seed Purchases",
+	Default = State.WebhookSeedPurchases,
+	Callback = function(value)
+		State.WebhookSeedPurchases = value
+		saveConfig()
+	end,
+})
+
+SettingsTab:AddToggle({
+	Name = "Webhook Expensive Gear",
+	Default = State.WebhookExpensiveGear,
+	Callback = function(value)
+		State.WebhookExpensiveGear = value
+		saveConfig()
+	end,
+})
+
+local ThresholdOptions = {
+	"500K",
+	"1M",
+	"10M",
+	"50M",
+	"75M",
+	"750M",
+	"1B",
+	"10B",
+	"15B",
+	"20B",
+	"100B",
+	"1T",
+	"25T",
+}
+
+SettingsTab:AddDropdown({
+	Name = "Expensive Threshold",
+	Default = getSafeDropdownDefault(ThresholdOptions, State.ExpensiveThresholdOption, "10B"),
+	Options = ThresholdOptions,
+	Callback = function(value)
+		State.ExpensiveThresholdOption = value
+		State.ExpensiveThreshold = parsePrice(value)
+		saveConfig()
+
+		OrionLib:MakeNotification({
+			Name = "Threshold Updated",
+			Content = "Expensive webhook threshold is now " .. value .. ".",
+			Time = 3,
+		})
+	end,
+})
+
+SettingsTab:AddButton({
+	Name = "Test Webhook",
+	Callback = function()
+		sendWebhook("✅ Webhook Test", "Your Fortune Auto Tool webhook is working.", {
+			{
+				name = "Player",
+				value = LocalPlayer.Name,
+				inline = true,
+			},
+			{
+				name = "Threshold",
+				value = formatPrice(State.ExpensiveThreshold),
+				inline = true,
+			},
+		}, 3447003)
+	end,
+})
+
+SettingsTab:AddSection({
+	Name = "Debug",
+})
+
+SettingsTab:AddButton({
+	Name = "Print Current Plot Seeds",
+	Callback = function()
+		local seeds = scanCurrentPlotSeeds()
+
+		print("========== CURRENT PLOT SEEDS ==========")
+
+		for _, seed in ipairs(seeds) do
+			print(
+				"Slot "
+					.. seed.Slot
+					.. " = "
+					.. seed.Name
+					.. " | "
+					.. seed.Rarity
+					.. " | "
+					.. seed.CostText
+					.. " | "
+					.. formatPrice(seed.Price)
+			)
+		end
+
+		print("========================================")
+	end,
+})
+
+SettingsTab:AddButton({
+	Name = "Destroy UI",
+	Callback = function()
+		ENV.Stop = true
+		OrionLib:Destroy()
+	end,
+})
+
+--// LOOPS
+
+task.spawn(function()
+	while not ENV.Stop do
+		if State.AutoRoll then
+			if State.AutoBuySelectedSeeds or State.AutoBuySelectedSeedRarities then
+				local boughtCount = buySelectedSeedsFromCurrentRoll()
+
+				if boughtCount > 0 then
+					task.wait(0.05)
+				end
+			end
+
+			rollSeeds()
+
+			task.wait(math.max(0.5, State.RollDelay))
+		else
+			task.wait(0.25)
+		end
+	end
+end)
+
+task.spawn(function()
+	while not ENV.Stop do
+		if State.AutoBuyAllGear then
+			buyAllGearOnce()
+			task.wait(math.max(1, State.GearDelay))
+		else
+			task.wait(0.25)
+		end
+	end
+end)
+
+task.spawn(function()
+	while not ENV.Stop do
+		if State.AutoSell then
+			sellCrates()
+			task.wait(math.max(1, State.SellDelay))
+		else
+			task.wait(0.25)
+		end
+	end
+end)
+
+--// INIT
+
+refreshSeedDropdown()
+updateSelectedSeedsLabel()
+updateSelectedSeedRaritiesLabel()
+
+OrionLib:MakeNotification({
+	Name = "Loaded",
+	Content = "Fortune Auto Tool loaded.",
+	Time = 5,
+})
+
+OrionLib:Init()
