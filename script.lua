@@ -26,6 +26,7 @@ local GearRemote = Remotes:FindFirstChild("Gear")
 local GearTransaction = GearRemote and GearRemote:FindFirstChild("Transaction")
 local EggShopRemote = Remotes:FindFirstChild("EggShop")
 local EggShopTransaction = EggShopRemote and EggShopRemote:FindFirstChild("Transaction")
+local RollEggRemote = Remotes:FindFirstChild("RollEgg")
 
 local Assets = ReplicatedStorage:WaitForChild("Assets")
 local SeedsFolder = Assets:WaitForChild("Seeds")
@@ -1043,6 +1044,56 @@ local function getEggShopTransaction()
 	return EggShopTransaction
 end
 
+local function getRollEggRemote()
+	if RollEggRemote then
+		return RollEggRemote
+	end
+
+	RollEggRemote = Remotes:FindFirstChild("RollEgg") or Remotes:WaitForChild("RollEgg", 5)
+
+	return RollEggRemote
+end
+
+local function rollAndClaimEgg(egg, quiet)
+	local remote = getRollEggRemote()
+	local eggName = egg and egg.Name
+
+	if not remote then
+		consoleWarn("[EGG ROLL] RollEgg remote not found.")
+		return false
+	end
+
+	if not eggName or eggName == "" or eggName == "Unknown" then
+		return false
+	end
+
+	local rollOk, rollErr = pcall(function()
+		remote:FireServer(eggName)
+	end)
+
+	if not rollOk then
+		consoleWarn("[EGG ROLL FAILED]", eggName, rollErr)
+		return false
+	end
+
+	task.wait(0.1)
+
+	local claimOk, claimErr = pcall(function()
+		remote:FireServer(eggName, "ClaimRolledPet")
+	end)
+
+	if claimOk then
+		if not quiet then
+			consolePrint("[EGG CLAIM]", eggName)
+		end
+
+		return true
+	else
+		consoleWarn("[EGG CLAIM FAILED]", eggName, claimErr)
+		return false
+	end
+end
+
 local function buyEggSlot(egg, quiet)
 	local transaction = getEggShopTransaction()
 
@@ -1072,6 +1123,8 @@ local function buyEggSlot(egg, quiet)
 				result
 			)
 		end
+
+		rollAndClaimEgg(egg, quiet)
 
 		return true
 	else
