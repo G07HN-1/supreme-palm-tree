@@ -5,11 +5,27 @@ local PreviousENV = getgenv().FortuneSeedUI
 if PreviousENV then
 	PreviousENV.Stop = true
 
-	if type(PreviousENV.Connections) == "table" then
-		for _, connection in ipairs(PreviousENV.Connections) do
-			pcall(function()
-				connection:Disconnect()
-			end)
+	if type(PreviousENV.Cleanup) == "function" then
+		pcall(PreviousENV.Cleanup)
+	else
+		if type(PreviousENV.Connections) == "table" then
+			for _, connection in ipairs(PreviousENV.Connections) do
+				pcall(function()
+					connection:Disconnect()
+				end)
+			end
+		end
+
+		if type(PreviousENV.Threads) == "table" then
+			for _, thread in ipairs(PreviousENV.Threads) do
+				pcall(function()
+					task.cancel(thread)
+				end)
+			end
+		end
+
+		if type(PreviousENV.DestroyUI) == "function" then
+			pcall(PreviousENV.DestroyUI)
 		end
 	end
 
@@ -19,6 +35,7 @@ end
 getgenv().FortuneSeedUI = {
 	Stop = false,
 	Connections = {},
+	Threads = {},
 }
 
 local ENV = getgenv().FortuneSeedUI
@@ -106,6 +123,13 @@ local State = {
 	ExpensiveThresholdOption = "10B",
 }
 
+local SessionStats = {
+	SeedsBoughtTotal = 0,
+	SeedsBoughtByName = {},
+	EggsBoughtTotal = 0,
+	EggsBoughtByName = {},
+}
+
 local SeedOptionMap = {}
 local CompostSeedOptionMap = {}
 local PlantSeedOptionMap = {}
@@ -176,6 +200,124 @@ local function consoleWarn(...)
 	end
 end
 
+local function disconnectConnections()
+	for _, connection in ipairs(ENV.Connections) do
+		pcall(function()
+			connection:Disconnect()
+		end)
+	end
+
+	table.clear(ENV.Connections)
+end
+
+local function cancelThreads()
+	for _, thread in ipairs(ENV.Threads) do
+		pcall(function()
+			task.cancel(thread)
+		end)
+	end
+
+	table.clear(ENV.Threads)
+end
+
+local function untrackThread(thread)
+	for index = #ENV.Threads, 1, -1 do
+		if ENV.Threads[index] == thread then
+			table.remove(ENV.Threads, index)
+			return
+		end
+	end
+end
+
+local function clearActionLocks()
+	IsUpgradingPlants = false
+	IsRemovingPlants = false
+	IsSprayingPlants = false
+	IsPlantingSeeds = false
+end
+
+local function clearRuntimeCaches()
+	table.clear(SeedOptionMap)
+	table.clear(CompostSeedOptionMap)
+	table.clear(PlantSeedOptionMap)
+	table.clear(SprayOptionMap)
+	table.clear(GearPriceCache)
+	GearNamesCache = nil
+	PlotCache = nil
+	FarmDirtCache = nil
+	FarmDirtCachePlot = nil
+	FarmDirtCacheTime = 0
+end
+
+local function cleanupCurrentScript()
+	if ENV.Cleaned then
+		return
+	end
+
+	ENV.Cleaned = true
+	ENV.Stop = true
+	clearActionLocks()
+	clearRuntimeCaches()
+	disconnectConnections()
+	cancelThreads()
+
+	pcall(function()
+		OrionLib:Destroy()
+	end)
+end
+
+ENV.Cleanup = cleanupCurrentScript
+ENV.DestroyUI = function()
+	pcall(function()
+		OrionLib:Destroy()
+	end)
+end
+
+local function spawnManaged(callback)
+	local thread
+
+	thread = task.spawn(function()
+		while not ENV.Stop do
+			local ok, err = xpcall(callback, debug.traceback)
+
+			if ok then
+				break
+			end
+
+			if not ENV.Stop then
+				consoleWarn("[TASK ERROR]", err)
+				clearActionLocks()
+				task.wait(1)
+			end
+		end
+
+		untrackThread(thread)
+	end)
+
+	table.insert(ENV.Threads, thread)
+
+	return thread
+end
+
+local function spawnOneShot(callback)
+	local thread
+
+	thread = task.spawn(function()
+		local ok, err = xpcall(callback, debug.traceback)
+
+		if not ok and not ENV.Stop then
+			consoleWarn("[TASK ERROR]", err)
+			clearActionLocks()
+		end
+
+		untrackThread(thread)
+	end)
+
+	table.insert(ENV.Threads, thread)
+
+	return thread
+end
+
 local function getSafeDropdownDefault(options, savedValue, fallback)
 	for _, option in ipairs(options) do
 		if option == savedValue then
@@ -184,6 +326,81 @@ local function getSafeDropdownDefault(options, savedValue, fallback)
 	end
 
 	return fallback
+end
+
+local StatsSummaryLabel
+local StatsSeedsLabel
+local StatsEggsLabel
+local updateStatsLabels
+
+local function incrementCount(map, key)
+	key = tostring(key or "Unknown")
+	map[key] = (map[key] or 0) + 1
+end
+
+local function formatCountMap(map)
+	local entries = {}
+
+	for name, count in pairs(map) do
+		table.insert(entries, {
+			Name = name,
+			Count = count,
+		})
+	end
+
+	table.sort(entries, function(a, b)
+		if a.Count == b.Count then
+			return a.Name < b.Name
+		end
+
+		return a.Count > b.Count
+	end)
+
+	if #entries == 0 then
+		return "None"
+	end
+
+	local parts = {}
+
+	for index, entry in ipairs(entries) do
+		if index > 10 then
+			table.insert(parts, "...")
+			break
+		end
+
+		table.insert(parts, entry.Name .. ": " .. tostring(entry.Count))
+	end
+
+	return table.concat(parts, ", ")
+end
+
+local function resetSessionStats()
+	SessionStats.SeedsBoughtTotal = 0
+	SessionStats.EggsBoughtTotal = 0
+	table.clear(SessionStats.SeedsBoughtByName)
+	table.clear(SessionStats.EggsBoughtByName)
+
+	if updateStatsLabels then
+		updateStatsLabels()
+	end
+end
+
+local function recordSeedPurchase(seed)
+	SessionStats.SeedsBoughtTotal += 1
+	incrementCount(SessionStats.SeedsBoughtByName, seed and seed.Name)
+
+	if updateStatsLabels then
+		updateStatsLabels()
+	end
+end
+
+local function recordEggPurchase(egg)
+	SessionStats.EggsBoughtTotal += 1
+	incrementCount(SessionStats.EggsBoughtByName, egg and (egg.Rarity and egg.Rarity .. " Egg" or egg.Name))
+
+	if updateStatsLabels then
+		updateStatsLabels()
+	end
 end
 
 --// PRICE UTILS
@@ -827,13 +1044,17 @@ local function getSelectedCompostSeedKeyList()
 end
 
 local function getUpgradePlantRemote()
-	UpgradePlantRemote = UpgradePlantRemote or Remotes:FindFirstChild("UpgradePlant") or Remotes:WaitForChild("UpgradePlant", 5)
+	UpgradePlantRemote = UpgradePlantRemote
+		or Remotes:FindFirstChild("UpgradePlant")
+		or Remotes:WaitForChild("UpgradePlant", 5)
 
 	return UpgradePlantRemote
 end
 
 local function getRemovePlantRemote()
-	RemovePlantRemote = RemovePlantRemote or Remotes:FindFirstChild("RemovePlant") or Remotes:WaitForChild("RemovePlant", 5)
+	RemovePlantRemote = RemovePlantRemote
+		or Remotes:FindFirstChild("RemovePlant")
+		or Remotes:WaitForChild("RemovePlant", 5)
 
 	return RemovePlantRemote
 end
@@ -907,6 +1128,17 @@ local function getPlantLevel(dirt)
 	return math.max(0, math.floor(tonumber(dirt and dirt:GetAttribute("PlantLevel")) or 0))
 end
 
+local function getPlantMutation(dirt)
+	return trim(dirt and dirt:GetAttribute("PlantMutation") or "")
+end
+
+local function hasActiveMutation(dirt)
+	local mutation = getPlantMutation(dirt)
+	local lowerMutation = mutation:lower()
+
+	return mutation ~= "" and lowerMutation ~= "normal" and lowerMutation ~= "none"
+end
+
 local function isOccupiedDirt(dirt)
 	if not dirt then
 		return false
@@ -929,6 +1161,21 @@ local function getPlantedDirts(forceRefresh)
 	end
 
 	return planted
+end
+
+local function getSprayableDirts(forceRefresh)
+	local sprayable = {}
+	local skippedMutated = 0
+
+	for _, dirt in ipairs(getPlantedDirts(forceRefresh)) do
+		if hasActiveMutation(dirt) then
+			skippedMutated += 1
+		else
+			table.insert(sprayable, dirt)
+		end
+	end
+
+	return sprayable, skippedMutated
 end
 
 local function getEmptyDirts(forceRefresh)
@@ -1382,7 +1629,7 @@ local function sendSeedWebhook(seed)
 
 	local rarity = normalizeSeedRarity(seed.Rarity)
 
-	sendWebhook("🌱 Selected Seed Purchased", "Auto-buy bought a selected seed before rolling again.", {
+	sendWebhook("ðŸŒ± Selected Seed Purchased", "Auto-buy bought a selected seed before rolling again.", {
 		{
 			name = "Seed",
 			value = seed.Name,
@@ -1415,23 +1662,28 @@ local function sendGearWebhook(gearName, price, priceText)
 		return
 	end
 
-	sendWebhook("🛒 Expensive Gear Purchased", "Auto-buy purchased gear at or above your expensive threshold.", {
+	sendWebhook(
+		"ðŸ›’ Expensive Gear Purchased",
+		"Auto-buy purchased gear at or above your expensive threshold.",
 		{
-			name = "Gear",
-			value = gearName,
-			inline = true,
+			{
+				name = "Gear",
+				value = gearName,
+				inline = true,
+			},
+			{
+				name = "Price",
+				value = formatPrice(price) .. " `" .. priceText .. "`",
+				inline = true,
+			},
+			{
+				name = "Threshold",
+				value = formatPrice(State.ExpensiveThreshold),
+				inline = true,
+			},
 		},
-		{
-			name = "Price",
-			value = formatPrice(price) .. " `" .. priceText .. "`",
-			inline = true,
-		},
-		{
-			name = "Threshold",
-			value = formatPrice(State.ExpensiveThreshold),
-			inline = true,
-		},
-	}, 16753920)
+		16753920
+	)
 end
 
 local function shouldCheckGearPrices()
@@ -1447,9 +1699,10 @@ local function buySeedSlot(seed, deferWebhook)
 
 	if ok then
 		consolePrint("[SEED BUY]", seed.Name, "slot:", seed.Slot, "price:", seed.CostText, "rarity:", seed.Rarity)
+		recordSeedPurchase(seed)
 
 		if deferWebhook then
-			task.spawn(function()
+			spawnOneShot(function()
 				sendSeedWebhook(seed)
 			end)
 		else
@@ -1563,6 +1816,8 @@ local function buyEggSlot(egg, quiet)
 	end)
 
 	if ok then
+		recordEggPurchase(egg)
+
 		if not quiet then
 			consolePrint(
 				"[EGG BUY]",
@@ -1978,6 +2233,7 @@ local function sprayPlantsOnce(quiet)
 
 	local remote = getUseSprayRemote()
 	local tool = getSelectedSprayTool()
+	local sprayableDirts, skippedMutated = getSprayableDirts(false)
 	local sprayed = 0
 
 	if not remote then
@@ -2000,6 +2256,21 @@ local function sprayPlantsOnce(quiet)
 		return 0
 	end
 
+	if #sprayableDirts == 0 then
+		IsSprayingPlants = false
+
+		if not quiet then
+			OrionLib:MakeNotification({
+				Name = "Plant Spray",
+				Content = "No sprayable plants found. Skipped " .. tostring(skippedMutated) .. " mutated plants.",
+				Time = 3,
+			})
+		end
+
+		consolePrint("[PLOT SPRAY] no sprayable plants. skipped mutated:", skippedMutated)
+		return 0
+	end
+
 	if not equipSprayTool(tool) then
 		IsSprayingPlants = false
 
@@ -2014,9 +2285,14 @@ local function sprayPlantsOnce(quiet)
 		return 0
 	end
 
-	for _, dirt in ipairs(getPlantedDirts(false)) do
+	for _, dirt in ipairs(sprayableDirts) do
 		if ENV.Stop then
 			break
+		end
+
+		if hasActiveMutation(dirt) then
+			skippedMutated += 1
+			continue
 		end
 
 		local ok, err = pcall(function()
@@ -2037,12 +2313,12 @@ local function sprayPlantsOnce(quiet)
 	if not quiet then
 		OrionLib:MakeNotification({
 			Name = "Plant Spray",
-			Content = "Spray request sent for " .. tostring(sprayed) .. " plants.",
+			Content = "Sprayed " .. tostring(sprayed) .. " plants. Skipped " .. tostring(skippedMutated) .. " mutated.",
 			Time = 3,
 		})
 	end
 
-	consolePrint("[PLOT SPRAY] sprayed:", sprayed, "spray:", tool.Name)
+	consolePrint("[PLOT SPRAY] sprayed:", sprayed, "skipped mutated:", skippedMutated, "spray:", tool.Name)
 	return sprayed
 end
 
@@ -2119,7 +2395,7 @@ local function plantSeedsOnce(quiet)
 			break
 		end
 
-		if not isPlantedDirt(dirt) then
+		if not isOccupiedDirt(dirt) then
 			local ok, err = pcall(function()
 				remote:FireServer(dirt)
 			end)
@@ -2218,6 +2494,12 @@ local PlotTab = Window:MakeTab({
 local AutoBuyTab = Window:MakeTab({
 	Name = "Auto Buy",
 	Icon = "shopping-cart",
+	PremiumOnly = false,
+})
+
+local StatsTab = Window:MakeTab({
+	Name = "Stats",
+	Icon = "bar-chart",
 	PremiumOnly = false,
 })
 
@@ -2699,7 +2981,7 @@ PlotTab:AddSlider({
 PlotTab:AddButton({
 	Name = "Upgrade Plants Once",
 	Callback = function()
-		task.spawn(function()
+		spawnOneShot(function()
 			upgradePlantsOnce(false)
 		end)
 	end,
@@ -2826,7 +3108,7 @@ PlotTab:AddButton({
 PlotTab:AddButton({
 	Name = "Plant Empty Spots Once",
 	Callback = function()
-		task.spawn(function()
+		spawnOneShot(function()
 			plantSeedsOnce(false)
 		end)
 	end,
@@ -2974,7 +3256,7 @@ PlotTab:AddButton({
 PlotTab:AddButton({
 	Name = "Spray Plants Once",
 	Callback = function()
-		task.spawn(function()
+		spawnOneShot(function()
 			sprayPlantsOnce(false)
 		end)
 	end,
@@ -3010,7 +3292,7 @@ PlotTab:AddSection({
 PlotTab:AddButton({
 	Name = "Remove All Plants",
 	Callback = function()
-		task.spawn(function()
+		spawnOneShot(function()
 			removeAllPlants()
 		end)
 	end,
@@ -3076,6 +3358,41 @@ AutoBuyTab:AddSlider({
 	Callback = function(value)
 		State.SellDelay = value
 		saveConfig()
+	end,
+})
+
+--// STATS TAB
+
+StatsTab:AddSection({
+	Name = "Session Stats",
+})
+
+StatsSummaryLabel = StatsTab:AddParagraph("Summary", "Loading...")
+StatsSeedsLabel = StatsTab:AddParagraph("Seeds Bought", "Loading...")
+StatsEggsLabel = StatsTab:AddParagraph("Eggs Bought", "Loading...")
+
+function updateStatsLabels()
+	if not StatsSummaryLabel or not StatsSeedsLabel or not StatsEggsLabel then
+		return
+	end
+
+	StatsSummaryLabel:Set(
+		"Seeds: " .. tostring(SessionStats.SeedsBoughtTotal) .. " | Eggs: " .. tostring(SessionStats.EggsBoughtTotal)
+	)
+	StatsSeedsLabel:Set(formatCountMap(SessionStats.SeedsBoughtByName))
+	StatsEggsLabel:Set(formatCountMap(SessionStats.EggsBoughtByName))
+end
+
+StatsTab:AddButton({
+	Name = "Reset Session Stats",
+	Callback = function()
+		resetSessionStats()
+
+		OrionLib:MakeNotification({
+			Name = "Stats Reset",
+			Content = "Session auto-buy stats have been reset.",
+			Time = 3,
+		})
 	end,
 })
 
@@ -3185,7 +3502,7 @@ SettingsTab:AddDropdown({
 SettingsTab:AddButton({
 	Name = "Test Webhook",
 	Callback = function()
-		sendWebhook("✅ Webhook Test", "Your Fortune Auto Tool webhook is working.", {
+		sendWebhook("âœ… Webhook Test", "Your Fortune Auto Tool webhook is working.", {
 			{
 				name = "Player",
 				value = LocalPlayer.Name,
@@ -3257,14 +3574,13 @@ SettingsTab:AddButton({
 SettingsTab:AddButton({
 	Name = "Destroy UI",
 	Callback = function()
-		ENV.Stop = true
-		OrionLib:Destroy()
+		cleanupCurrentScript()
 	end,
 })
 
 --// LOOPS
 
-task.spawn(function()
+spawnManaged(function()
 	while not ENV.Stop do
 		if State.AutoRoll then
 			if State.AutoBuySelectedSeeds or State.AutoBuySelectedSeedRarities then
@@ -3284,7 +3600,7 @@ task.spawn(function()
 	end
 end)
 
-task.spawn(function()
+spawnManaged(function()
 	while not ENV.Stop do
 		if State.AutoBuyAllGear then
 			buyAllGearOnce()
@@ -3295,7 +3611,7 @@ task.spawn(function()
 	end
 end)
 
-task.spawn(function()
+spawnManaged(function()
 	while not ENV.Stop do
 		if State.AutoBuyAllEggs or State.AutoBuySelectedEggRarities then
 			buyEggsOnce(State.AutoBuyAllEggs)
@@ -3306,7 +3622,7 @@ task.spawn(function()
 	end
 end)
 
-task.spawn(function()
+spawnManaged(function()
 	while not ENV.Stop do
 		if State.AutoCompost then
 			compostSelectedSeedsOnce(true)
@@ -3317,7 +3633,7 @@ task.spawn(function()
 	end
 end)
 
-task.spawn(function()
+spawnManaged(function()
 	while not ENV.Stop do
 		if State.AutoUpgradePlants then
 			local startedAt = os.clock()
@@ -3332,7 +3648,7 @@ task.spawn(function()
 	end
 end)
 
-task.spawn(function()
+spawnManaged(function()
 	while not ENV.Stop do
 		if State.AutoPlantSeeds then
 			plantSeedsOnce(true)
@@ -3343,7 +3659,7 @@ task.spawn(function()
 	end
 end)
 
-task.spawn(function()
+spawnManaged(function()
 	while not ENV.Stop do
 		if State.AutoSprayPlants then
 			sprayPlantsOnce(true)
@@ -3354,7 +3670,7 @@ task.spawn(function()
 	end
 end)
 
-task.spawn(function()
+spawnManaged(function()
 	while not ENV.Stop do
 		if State.AutoSell then
 			sellCrates()
@@ -3377,6 +3693,7 @@ updateSelectedEggRaritiesLabel()
 updateCompostSeedLabel()
 updateSelectedPlantSeedLabel()
 updateSelectedSprayLabel()
+updateStatsLabels()
 
 OrionLib:MakeNotification({
 	Name = "Loaded",
