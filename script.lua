@@ -146,6 +146,23 @@ local PlantUpgradePassDuration = 2.5
 local PlantUpgradeBatchSize = 30
 local PlantRemovePassDuration = 5
 local FarmDirtCacheTTL = 5
+local FarmFloorPaths = {
+	{
+		Name = "Floor 1",
+		Path = {},
+		Order = 1,
+	},
+	{
+		Name = "Floor 2",
+		Path = { "SecondFloor" },
+		Order = 2,
+	},
+	{
+		Name = "Floor 3",
+		Path = { "ThirdFloor" },
+		Order = 3,
+	},
+}
 local IsUpgradingPlants = false
 local IsRemovingPlants = false
 local IsSprayingPlants = false
@@ -332,6 +349,8 @@ local StatsSummaryLabel
 local StatsSeedsLabel
 local StatsEggsLabel
 local updateStatsLabels
+local PlantViewerLabel
+local updatePlantViewerLabel
 
 local function incrementCount(map, key)
 	key = tostring(key or "Unknown")
@@ -1071,6 +1090,41 @@ local function getPlantSeedRemote()
 	return PlantSeedRemote
 end
 
+local function getNestedChild(root, path)
+	local current = root
+
+	for _, name in ipairs(path) do
+		current = current and current:FindFirstChild(name)
+
+		if not current then
+			return nil
+		end
+	end
+
+	return current
+end
+
+local function addFarmDirtsFromFarmPlot(farmPlot, floorInfo, dirts)
+	if not farmPlot then
+		return
+	end
+
+	for _, plotPart in ipairs(farmPlot:GetChildren()) do
+		if plotPart.Name:match("^Plot%d+$") then
+			local dirt = plotPart:FindFirstChild("Dirt")
+
+			if dirt then
+				table.insert(dirts, {
+					Dirt = dirt,
+					FloorOrder = floorInfo.Order,
+					FloorName = floorInfo.Name,
+					PlotOrder = tonumber(plotPart.Name:match("%d+")) or 0,
+				})
+			end
+		end
+	end
+end
+
 local function getFarmDirts(forceRefresh)
 	local plot = findMyPlot()
 	local now = os.clock()
@@ -1084,27 +1138,30 @@ local function getFarmDirts(forceRefresh)
 		return FarmDirtCache
 	end
 
-	local dirts = {}
-	local farmPlot = plot and plot:FindFirstChild("FarmPlot")
+	local dirtInfos = {}
 
-	if farmPlot then
-		for _, plotPart in ipairs(farmPlot:GetChildren()) do
-			if plotPart.Name:match("^Plot%d+$") then
-				local dirt = plotPart:FindFirstChild("Dirt")
+	if plot then
+		for _, floorInfo in ipairs(FarmFloorPaths) do
+			local floorRoot = getNestedChild(plot, floorInfo.Path)
+			local farmPlot = floorRoot and floorRoot:FindFirstChild("FarmPlot")
 
-				if dirt then
-					table.insert(dirts, dirt)
-				end
-			end
+			addFarmDirtsFromFarmPlot(farmPlot, floorInfo, dirtInfos)
 		end
 	end
 
-	table.sort(dirts, function(a, b)
-		local aNum = tonumber(a.Parent and a.Parent.Name:match("%d+")) or 0
-		local bNum = tonumber(b.Parent and b.Parent.Name:match("%d+")) or 0
+	table.sort(dirtInfos, function(a, b)
+		if a.FloorOrder == b.FloorOrder then
+			return a.PlotOrder < b.PlotOrder
+		end
 
-		return aNum < bNum
+		return a.FloorOrder < b.FloorOrder
 	end)
+
+	local dirts = {}
+
+	for _, info in ipairs(dirtInfos) do
+		table.insert(dirts, info.Dirt)
+	end
 
 	FarmDirtCache = dirts
 	FarmDirtCachePlot = plot
@@ -1161,6 +1218,82 @@ local function getPlantedDirts(forceRefresh)
 	end
 
 	return planted
+end
+
+local function getPlantDisplayName(dirt)
+	local plantName = trim(dirt and dirt:GetAttribute("PlantName") or "")
+
+	if plantName == "" then
+		plantName = "Unknown"
+	end
+
+	if hasActiveMutation(dirt) then
+		return getPlantMutation(dirt) .. " " .. plantName
+	end
+
+	return plantName
+end
+
+local function getPlacedPlantSummary(forceRefresh)
+	local groups = {}
+	local total = 0
+
+	for _, dirt in ipairs(getPlantedDirts(forceRefresh)) do
+		local displayName = getPlantDisplayName(dirt)
+		local level = getPlantLevel(dirt)
+		local key = displayName .. "\0" .. tostring(level)
+
+		if not groups[key] then
+			groups[key] = {
+				Name = displayName,
+				Level = level,
+				Count = 0,
+			}
+		end
+
+		groups[key].Count += 1
+		total += 1
+	end
+
+	local entries = {}
+
+	for _, entry in pairs(groups) do
+		table.insert(entries, entry)
+	end
+
+	table.sort(entries, function(a, b)
+		if a.Level == b.Level then
+			if a.Count == b.Count then
+				return a.Name < b.Name
+			end
+
+			return a.Count > b.Count
+		end
+
+		return a.Level > b.Level
+	end)
+
+	return entries, total
+end
+
+local function formatPlacedPlantSummary(forceRefresh)
+	local entries, total = getPlacedPlantSummary(forceRefresh)
+
+	if total == 0 then
+		return "No plants placed."
+	end
+
+	local lines = {
+		"Total Plants: " .. tostring(total),
+	}
+
+	for _, entry in ipairs(entries) do
+		local countText = entry.Count > 1 and " (x" .. tostring(entry.Count) .. ")" or ""
+
+		table.insert(lines, entry.Name .. countText .. " - Level " .. tostring(entry.Level))
+	end
+
+	return table.concat(lines, "\n")
 end
 
 local function getSprayableDirts(forceRefresh)
@@ -2147,6 +2280,11 @@ local function upgradePlantsOnce(quiet)
 	end
 
 	consolePrint("[PLOT UPGRADE] upgraded:", upgraded, "skipped:", skipped, "target:", targetLevel)
+
+	if updatePlantViewerLabel then
+		updatePlantViewerLabel()
+	end
+
 	return upgraded
 end
 
@@ -2213,6 +2351,11 @@ local function removeAllPlants()
 	})
 
 	consolePrint("[PLOT REMOVE] removed:", removed)
+
+	if updatePlantViewerLabel then
+		updatePlantViewerLabel(true)
+	end
+
 	return removed
 end
 
@@ -2319,6 +2462,11 @@ local function sprayPlantsOnce(quiet)
 	end
 
 	consolePrint("[PLOT SPRAY] sprayed:", sprayed, "skipped mutated:", skippedMutated, "spray:", tool.Name)
+
+	if updatePlantViewerLabel then
+		updatePlantViewerLabel()
+	end
+
 	return sprayed
 end
 
@@ -2421,6 +2569,11 @@ local function plantSeedsOnce(quiet)
 	end
 
 	consolePrint("[PLOT PLANT] planted:", planted, "seed:", seedName, "tool:", tool.Name)
+
+	if updatePlantViewerLabel then
+		updatePlantViewerLabel(true)
+	end
+
 	return planted
 end
 
@@ -2960,6 +3113,27 @@ CompostTab:AddSlider({
 })
 
 --// PLOT TAB
+
+PlotTab:AddSection({
+	Name = "Plant Viewer",
+})
+
+PlantViewerLabel = PlotTab:AddParagraph("Placed Plants", "Loading...")
+
+function updatePlantViewerLabel(forceRefresh)
+	if not PlantViewerLabel then
+		return
+	end
+
+	PlantViewerLabel:Set(formatPlacedPlantSummary(forceRefresh == true))
+end
+
+PlotTab:AddButton({
+	Name = "Refresh Plant Viewer",
+	Callback = function()
+		updatePlantViewerLabel(true)
+	end,
+})
 
 PlotTab:AddSection({
 	Name = "Plant Upgrades",
@@ -3694,6 +3868,7 @@ updateCompostSeedLabel()
 updateSelectedPlantSeedLabel()
 updateSelectedSprayLabel()
 updateStatsLabels()
+updatePlantViewerLabel(true)
 
 OrionLib:MakeNotification({
 	Name = "Loaded",
