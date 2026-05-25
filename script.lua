@@ -104,6 +104,10 @@ local State = {
 	SelectedSprayOption = nil,
 	SelectedSprayBaseName = nil,
 	SelectedPlantSeedOption = nil,
+	SelectedPlotFloorOption = "All Floors",
+	SelectedPlotFloors = {
+		["All Floors"] = true,
+	},
 
 	SaveConfigEnabled = true,
 	RollDelay = 1.25,
@@ -139,6 +143,7 @@ local GearPriceCache = {}
 local PlotCache = nil
 local FarmDirtCache = nil
 local FarmDirtCachePlot = nil
+local FarmDirtCacheFloorKey = nil
 local FarmDirtCacheTime = 0
 local GearBuyItemDelay = 0.2
 local EggBuyItemDelay = 0.2
@@ -162,6 +167,12 @@ local FarmFloorPaths = {
 		Path = { "ThirdFloor" },
 		Order = 3,
 	},
+}
+local PlotFloorOptions = {
+	"All Floors",
+	"Floor 1",
+	"Floor 2",
+	"Floor 3",
 }
 local IsUpgradingPlants = false
 local IsRemovingPlants = false
@@ -263,6 +274,7 @@ local function clearRuntimeCaches()
 	PlotCache = nil
 	FarmDirtCache = nil
 	FarmDirtCachePlot = nil
+	FarmDirtCacheFloorKey = nil
 	FarmDirtCacheTime = 0
 end
 
@@ -351,6 +363,8 @@ local StatsEggsLabel
 local updateStatsLabels
 local PlantViewerLabel
 local updatePlantViewerLabel
+local SelectedPlotFloorsLabel
+local updateSelectedPlotFloorsLabel
 
 local function incrementCount(map, key)
 	key = tostring(key or "Unknown")
@@ -616,6 +630,69 @@ local function applySelectedCompostSeeds(savedSeeds)
 	end
 end
 
+local function isValidPlotFloorOption(option)
+	for _, floorOption in ipairs(PlotFloorOptions) do
+		if floorOption == option then
+			return true
+		end
+	end
+
+	return false
+end
+
+local function getSelectedPlotFloorList()
+	local floors = {}
+
+	if State.SelectedPlotFloors["All Floors"] then
+		return {
+			"All Floors",
+		}
+	end
+
+	for _, option in ipairs(PlotFloorOptions) do
+		if option ~= "All Floors" and State.SelectedPlotFloors[option] then
+			table.insert(floors, option)
+		end
+	end
+
+	if #floors == 0 then
+		return {
+			"All Floors",
+		}
+	end
+
+	return floors
+end
+
+local function applySelectedPlotFloors(savedFloors)
+	State.SelectedPlotFloors = {}
+
+	if type(savedFloors) ~= "table" then
+		State.SelectedPlotFloors["All Floors"] = true
+		return
+	end
+
+	for key, value in pairs(savedFloors) do
+		local floorName = nil
+
+		if type(key) == "number" and type(value) == "string" then
+			floorName = value
+		elseif type(key) == "string" and value then
+			floorName = key
+		end
+
+		if floorName and isValidPlotFloorOption(floorName) then
+			State.SelectedPlotFloors[floorName] = true
+		end
+	end
+
+	if State.SelectedPlotFloors["All Floors"] or next(State.SelectedPlotFloors) == nil then
+		State.SelectedPlotFloors = {
+			["All Floors"] = true,
+		}
+	end
+end
+
 local function getConfigData()
 	return {
 		SaveConfigEnabled = State.SaveConfigEnabled,
@@ -642,6 +719,8 @@ local function getConfigData()
 		SelectedSprayOption = State.SelectedSprayOption,
 		SelectedSprayBaseName = State.SelectedSprayBaseName,
 		SelectedPlantSeedOption = State.SelectedPlantSeedOption,
+		SelectedPlotFloorOption = State.SelectedPlotFloorOption,
+		SelectedPlotFloors = getSelectedPlotFloorList(),
 		RollDelay = State.RollDelay,
 		GearDelay = State.GearDelay,
 		EggDelay = State.EggDelay,
@@ -762,6 +841,10 @@ local function loadConfig()
 		State.SelectedPlantSeedOption = data.SelectedPlantSeedOption
 	end
 
+	if type(data.SelectedPlotFloorOption) == "string" and isValidPlotFloorOption(data.SelectedPlotFloorOption) then
+		State.SelectedPlotFloorOption = data.SelectedPlotFloorOption
+	end
+
 	if type(data.ExpensiveThresholdOption) == "string" then
 		State.ExpensiveThresholdOption = data.ExpensiveThresholdOption
 		State.ExpensiveThreshold = parsePrice(data.ExpensiveThresholdOption)
@@ -771,6 +854,7 @@ local function loadConfig()
 	applySelectedSeedRarities(data.SelectedSeedRarities)
 	applySelectedEggRarities(data.SelectedEggRarities)
 	applySelectedCompostSeeds(data.SelectedCompostSeeds)
+	applySelectedPlotFloors(data.SelectedPlotFloors)
 
 	if
 		next(State.SelectedCompostSeeds) == nil
@@ -1090,6 +1174,29 @@ local function getPlantSeedRemote()
 	return PlantSeedRemote
 end
 
+local function invalidateFarmDirtCache()
+	FarmDirtCache = nil
+	FarmDirtCachePlot = nil
+	FarmDirtCacheFloorKey = nil
+	FarmDirtCacheTime = 0
+end
+
+local function getSelectedPlotFloorKey()
+	return table.concat(getSelectedPlotFloorList(), "|")
+end
+
+local function shouldUseFarmFloor(floorInfo)
+	if State.SelectedPlotFloors["All Floors"] then
+		return true
+	end
+
+	if next(State.SelectedPlotFloors) == nil then
+		return true
+	end
+
+	return State.SelectedPlotFloors[floorInfo.Name] == true
+end
+
 local function getNestedChild(root, path)
 	local current = root
 
@@ -1128,11 +1235,13 @@ end
 local function getFarmDirts(forceRefresh)
 	local plot = findMyPlot()
 	local now = os.clock()
+	local floorKey = getSelectedPlotFloorKey()
 
 	if
 		not forceRefresh
 		and FarmDirtCache
 		and FarmDirtCachePlot == plot
+		and FarmDirtCacheFloorKey == floorKey
 		and now - FarmDirtCacheTime < FarmDirtCacheTTL
 	then
 		return FarmDirtCache
@@ -1142,10 +1251,12 @@ local function getFarmDirts(forceRefresh)
 
 	if plot then
 		for _, floorInfo in ipairs(FarmFloorPaths) do
-			local floorRoot = getNestedChild(plot, floorInfo.Path)
-			local farmPlot = floorRoot and floorRoot:FindFirstChild("FarmPlot")
+			if shouldUseFarmFloor(floorInfo) then
+				local floorRoot = getNestedChild(plot, floorInfo.Path)
+				local farmPlot = floorRoot and floorRoot:FindFirstChild("FarmPlot")
 
-			addFarmDirtsFromFarmPlot(farmPlot, floorInfo, dirtInfos)
+				addFarmDirtsFromFarmPlot(farmPlot, floorInfo, dirtInfos)
+			end
 		end
 	end
 
@@ -1165,6 +1276,7 @@ local function getFarmDirts(forceRefresh)
 
 	FarmDirtCache = dirts
 	FarmDirtCachePlot = plot
+	FarmDirtCacheFloorKey = floorKey
 	FarmDirtCacheTime = now
 
 	return dirts
@@ -1333,6 +1445,16 @@ local function getSeedToolBaseName(toolName)
 	return name
 end
 
+local function getSeedNameFromTool(tool)
+	local baseName = getSeedToolBaseName(tool and tool.Name)
+
+	if SeedsFolder:FindFirstChild(baseName) then
+		return baseName
+	end
+
+	return nil
+end
+
 local function addSeedToolsFrom(container, tools)
 	if not container then
 		return
@@ -1340,9 +1462,7 @@ local function addSeedToolsFrom(container, tools)
 
 	for _, item in ipairs(container:GetChildren()) do
 		if item:IsA("Tool") then
-			local baseName = getSeedToolBaseName(item.Name)
-
-			if SeedsFolder:FindFirstChild(baseName) then
+			if getSeedNameFromTool(item) then
 				table.insert(tools, item)
 			end
 		end
@@ -1382,11 +1502,11 @@ local function getSelectedSeedTool()
 	for _, tool in ipairs(getSeedTools()) do
 		local toolName = tool.Name
 
-		if
-			toolName == seedName
-			or toolName == getCompostSeedKey(seedName)
-			or getSeedToolBaseName(toolName) == seedName
-		then
+		if toolName == State.SelectedPlantSeedOption and getSeedNameFromTool(tool) == seedName then
+			return tool
+		end
+
+		if toolName == seedName or toolName == getCompostSeedKey(seedName) or getSeedNameFromTool(tool) == seedName then
 			return tool
 		end
 	end
@@ -3115,6 +3235,65 @@ CompostTab:AddSlider({
 --// PLOT TAB
 
 PlotTab:AddSection({
+	Name = "Floor Filter",
+})
+
+SelectedPlotFloorsLabel = PlotTab:AddParagraph("Selected Floors", "All Floors")
+
+function updateSelectedPlotFloorsLabel()
+	if not SelectedPlotFloorsLabel then
+		return
+	end
+
+	SelectedPlotFloorsLabel:Set(table.concat(getSelectedPlotFloorList(), ", "))
+end
+
+PlotTab:AddDropdown({
+	Name = "Floor Dropdown",
+	Default = getSafeDropdownDefault(PlotFloorOptions, State.SelectedPlotFloorOption, "All Floors"),
+	Options = PlotFloorOptions,
+	Callback = function(value)
+		State.SelectedPlotFloorOption = value
+
+		if value == "All Floors" then
+			State.SelectedPlotFloors = {
+				["All Floors"] = true,
+			}
+		elseif isValidPlotFloorOption(value) then
+			State.SelectedPlotFloors["All Floors"] = nil
+			State.SelectedPlotFloors[value] = true
+		end
+
+		invalidateFarmDirtCache()
+		updateSelectedPlotFloorsLabel()
+
+		if updatePlantViewerLabel then
+			updatePlantViewerLabel(true)
+		end
+
+		saveConfig()
+	end,
+})
+
+PlotTab:AddButton({
+	Name = "Use All Floors",
+	Callback = function()
+		State.SelectedPlotFloorOption = "All Floors"
+		State.SelectedPlotFloors = {
+			["All Floors"] = true,
+		}
+		invalidateFarmDirtCache()
+		updateSelectedPlotFloorsLabel()
+
+		if updatePlantViewerLabel then
+			updatePlantViewerLabel(true)
+		end
+
+		saveConfig()
+	end,
+})
+
+PlotTab:AddSection({
 	Name = "Plant Viewer",
 })
 
@@ -3240,18 +3419,22 @@ PlantSeedDropdown = PlotTab:AddDropdown({
 })
 
 local function refreshPlantSeedDropdown()
-	local seedNames = getSeedNames()
+	local seedTools = getSeedTools()
 	local options = {
 		"Select Seed",
 	}
 	PlantSeedOptionMap = {}
 
-	for _, seedName in ipairs(seedNames) do
-		table.insert(options, seedName)
-		PlantSeedOptionMap[seedName] = seedName
+	for _, tool in ipairs(seedTools) do
+		local seedName = getSeedNameFromTool(tool)
+
+		if seedName then
+			table.insert(options, tool.Name)
+			PlantSeedOptionMap[tool.Name] = seedName
+		end
 	end
 
-	if #seedNames == 0 then
+	if #seedTools == 0 then
 		options = {
 			"No Seeds Found",
 		}
@@ -3262,7 +3445,7 @@ local function refreshPlantSeedDropdown()
 	pcall(function()
 		if State.SelectedPlantSeedOption and PlantSeedOptionMap[State.SelectedPlantSeedOption] then
 			PlantSeedDropdown:Set(State.SelectedPlantSeedOption)
-		elseif #seedNames == 0 then
+		elseif #seedTools == 0 then
 			PlantSeedDropdown:Set("No Seeds Found")
 		else
 			PlantSeedDropdown:Set("Select Seed")
@@ -3865,6 +4048,7 @@ updateSelectedSeedsLabel()
 updateSelectedSeedRaritiesLabel()
 updateSelectedEggRaritiesLabel()
 updateCompostSeedLabel()
+updateSelectedPlotFloorsLabel()
 updateSelectedPlantSeedLabel()
 updateSelectedSprayLabel()
 updateStatsLabels()
