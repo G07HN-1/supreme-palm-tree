@@ -63,6 +63,10 @@ local PlantSeedRemote = Remotes:FindFirstChild("PlantSeed")
 local PlantRushRemote = Remotes:FindFirstChild("PlantRush")
 local PlantRushShootRemote = PlantRushRemote and PlantRushRemote:FindFirstChild("Shoot")
 local PlantRushDropClaimRemote = PlantRushRemote and PlantRushRemote:FindFirstChild("DropClaim")
+local PetsRemote = Remotes:FindFirstChild("Pets")
+local EquipPetRemote = PetsRemote and PetsRemote:FindFirstChild("EquipPet")
+local UnequipPetRemote = PetsRemote and PetsRemote:FindFirstChild("UnequipPet")
+local UpgradePetRemote = PetsRemote and PetsRemote:FindFirstChild("UpgradePet")
 
 local GearRemote = Remotes:FindFirstChild("Gear")
 local GearTransaction = GearRemote and GearRemote:FindFirstChild("Transaction")
@@ -125,6 +129,7 @@ local State = {
 	AutoPlantRushShoot = false,
 	AutoPlantRushPickup = false,
 	AutoQueenBeeHoneycomb = false,
+	AutoUpgradePets = false,
 	AntiAFK = true,
 
 	SelectedSeedOption = nil,
@@ -139,6 +144,7 @@ local State = {
 	SelectedSprayBaseName = nil,
 	SelectedPlantSeedOption = nil,
 	SelectedPlotFloorOption = "All Floors",
+	SelectedPetTypeOption = nil,
 	SelectedPlotFloors = {
 		["All Floors"] = true,
 	},
@@ -152,6 +158,7 @@ local State = {
 	PlantUpgradeTargetLevel = 40,
 	SprayDelay = 5,
 	PlantSeedDelay = 5,
+	PetUpgradeTargetLevel = 50,
 
 	WebhookURL = "",
 	WebhookSeedPurchases = true,
@@ -171,6 +178,7 @@ local SeedOptionMap = {}
 local CompostSeedOptionMap = {}
 local PlantSeedOptionMap = {}
 local SprayOptionMap = {}
+local PetTypeOptionMap = {}
 local GearNamesCache = nil
 local GearPriceCache = {}
 local PlotCache = nil
@@ -310,6 +318,7 @@ local function clearRuntimeCaches()
 	table.clear(CompostSeedOptionMap)
 	table.clear(PlantSeedOptionMap)
 	table.clear(SprayOptionMap)
+	table.clear(PetTypeOptionMap)
 	table.clear(GearPriceCache)
 	GearNamesCache = nil
 	PlotCache = nil
@@ -751,6 +760,7 @@ local function getConfigData()
 		AutoPlantRushShoot = State.AutoPlantRushShoot,
 		AutoPlantRushPickup = State.AutoPlantRushPickup,
 		AutoQueenBeeHoneycomb = State.AutoQueenBeeHoneycomb,
+		AutoUpgradePets = State.AutoUpgradePets,
 		AntiAFK = State.AntiAFK,
 		SelectedSeedOption = State.SelectedSeedOption,
 		SelectedSeeds = getSelectedSeedList(),
@@ -763,6 +773,7 @@ local function getConfigData()
 		SelectedSprayOption = State.SelectedSprayOption,
 		SelectedSprayBaseName = State.SelectedSprayBaseName,
 		SelectedPlantSeedOption = State.SelectedPlantSeedOption,
+		SelectedPetTypeOption = State.SelectedPetTypeOption,
 		SelectedPlotFloorOption = State.SelectedPlotFloorOption,
 		SelectedPlotFloors = getSelectedPlotFloorList(),
 		RollDelay = State.RollDelay,
@@ -774,6 +785,7 @@ local function getConfigData()
 		PlantUpgradeTargetLevel = State.PlantUpgradeTargetLevel,
 		SprayDelay = State.SprayDelay,
 		PlantSeedDelay = State.PlantSeedDelay,
+		PetUpgradeTargetLevel = State.PetUpgradeTargetLevel,
 		WebhookURL = State.WebhookURL,
 		WebhookSeedPurchases = State.WebhookSeedPurchases,
 		WebhookExpensiveGear = State.WebhookExpensiveGear,
@@ -826,6 +838,7 @@ local function loadConfig()
 		"AutoPlantRushShoot",
 		"AutoPlantRushPickup",
 		"AutoQueenBeeHoneycomb",
+		"AutoUpgradePets",
 		"AntiAFK",
 		"WebhookSeedPurchases",
 		"WebhookExpensiveGear",
@@ -845,6 +858,7 @@ local function loadConfig()
 		"PlantUpgradeTargetLevel",
 		"SprayDelay",
 		"PlantSeedDelay",
+		"PetUpgradeTargetLevel",
 		"ExpensiveThreshold",
 	}) do
 		if type(data[key]) == "number" then
@@ -855,6 +869,7 @@ local function loadConfig()
 	State.PlantUpgradeTargetLevel = math.clamp(math.floor(State.PlantUpgradeTargetLevel), 1, 100)
 	State.PlantUpgradeDelay = math.max(1, tonumber(State.PlantUpgradeDelay) or 1)
 	State.CompostDelay = math.clamp(tonumber(State.CompostDelay) or 5, 0.1, 5)
+	State.PetUpgradeTargetLevel = math.clamp(math.floor(tonumber(State.PetUpgradeTargetLevel) or 50), 1, 50)
 
 	if type(data.WebhookURL) == "string" then
 		State.WebhookURL = data.WebhookURL
@@ -886,6 +901,10 @@ local function loadConfig()
 
 	if type(data.SelectedPlantSeedOption) == "string" then
 		State.SelectedPlantSeedOption = data.SelectedPlantSeedOption
+	end
+
+	if type(data.SelectedPetTypeOption) == "string" then
+		State.SelectedPetTypeOption = data.SelectedPetTypeOption
 	end
 
 	if type(data.SelectedPlotFloorOption) == "string" and isValidPlotFloorOption(data.SelectedPlotFloorOption) then
@@ -1241,6 +1260,30 @@ local function getPlantRushDropClaimRemote()
 	PlantRushDropClaimRemote = PlantRushRemote and PlantRushRemote:FindFirstChild("DropClaim")
 
 	return PlantRushDropClaimRemote
+end
+
+local function getPetsRemote(remoteName)
+	PetsRemote = PetsRemote or Remotes:FindFirstChild("Pets") or Remotes:WaitForChild("Pets", 5)
+
+	return PetsRemote and (PetsRemote:FindFirstChild(remoteName) or PetsRemote:WaitForChild(remoteName, 5))
+end
+
+local function getEquipPetRemote()
+	EquipPetRemote = EquipPetRemote or getPetsRemote("EquipPet")
+
+	return EquipPetRemote
+end
+
+local function getUnequipPetRemote()
+	UnequipPetRemote = UnequipPetRemote or getPetsRemote("UnequipPet")
+
+	return UnequipPetRemote
+end
+
+local function getUpgradePetRemote()
+	UpgradePetRemote = UpgradePetRemote or getPetsRemote("UpgradePet")
+
+	return UpgradePetRemote
 end
 
 local function invalidateFarmDirtCache()
@@ -2062,6 +2105,407 @@ local function collectQueenBeeHoneycombsOnce()
 	end
 
 	return collected
+end
+
+local function getPetKeyFromInstance(instance)
+	local key = instance and instance:GetAttribute("PetKey")
+
+	if type(key) == "string" and key ~= "" then
+		return key
+	end
+
+	local name = tostring(instance and instance.Name or "")
+	local prefix = "Pet_" .. LocalPlayer.Name .. "_"
+
+	if name:sub(1, #prefix) == prefix then
+		return name:sub(#prefix + 1)
+	end
+
+	local displayPrefix = "Pet_" .. LocalPlayer.DisplayName .. "_"
+
+	if name:sub(1, #displayPrefix) == displayPrefix then
+		return name:sub(#displayPrefix + 1)
+	end
+
+	if name:sub(1, 4) == "Pet_" then
+		local remaining = name:sub(5)
+		local firstUnderscore = remaining:find("_", 1, true)
+
+		if firstUnderscore then
+			return remaining:sub(firstUnderscore + 1)
+		end
+	end
+
+	return nil
+end
+
+local function getPetNameFromKey(petKey)
+	local name = tostring(petKey or ""):match("^([^_]+)")
+
+	if name and name ~= "" then
+		return name
+	end
+
+	return nil
+end
+
+local function getPetSizeRank(size)
+	local lowerSize = tostring(size or ""):lower()
+
+	if lowerSize:find("giant", 1, true) then
+		return 3
+	end
+
+	if lowerSize:find("big", 1, true) then
+		return 2
+	end
+
+	if lowerSize:find("regular", 1, true) or lowerSize:find("normal", 1, true) then
+		return 1
+	end
+
+	return 0
+end
+
+local function buildPetInfo(instance)
+	local petKey = getPetKeyFromInstance(instance)
+
+	if not petKey then
+		return nil
+	end
+
+	local petName = instance:GetAttribute("PetName")
+
+	if type(petName) ~= "string" or petName == "" then
+		petName = getPetNameFromKey(petKey)
+	end
+
+	if not petName then
+		return nil
+	end
+
+	local petLevel = math.max(0, math.floor(tonumber(instance:GetAttribute("PetLevel")) or 0))
+	local petSize = tostring(instance:GetAttribute("PetSize") or "Regular")
+	local earningsMultiplier = tonumber(instance:GetAttribute("EarningsMultiplier")) or 0
+	local floorIndex = math.max(0, math.floor(tonumber(instance:GetAttribute("FloorIndex")) or 0))
+
+	return {
+		Key = petKey,
+		Name = petName,
+		Level = petLevel,
+		Size = petSize,
+		SizeRank = getPetSizeRank(petSize),
+		EarningsMultiplier = earningsMultiplier,
+		FloorIndex = floorIndex,
+		Instance = instance,
+		Equipped = instance.Name:sub(1, 4) == "Pet_",
+	}
+end
+
+local function addPetsFromRoot(root, petsByKey)
+	if not root then
+		return
+	end
+
+	for _, instance in ipairs(root:GetDescendants()) do
+		if instance:GetAttribute("PetKey") or instance.Name:sub(1, 4) == "Pet_" then
+			local petInfo = buildPetInfo(instance)
+
+			if petInfo and not petsByKey[petInfo.Key] then
+				petsByKey[petInfo.Key] = petInfo
+			end
+		end
+	end
+end
+
+local function getAllPets()
+	local petsByKey = {}
+	local plot = findMyPlot()
+
+	addPetsFromRoot(LocalPlayer, petsByKey)
+	addPetsFromRoot(LocalPlayer.Character, petsByKey)
+	addPetsFromRoot(plot, petsByKey)
+
+	local pets = {}
+
+	for _, petInfo in pairs(petsByKey) do
+		table.insert(pets, petInfo)
+	end
+
+	table.sort(pets, function(a, b)
+		if a.Name == b.Name then
+			if a.SizeRank == b.SizeRank then
+				if a.Level == b.Level then
+					return a.Key < b.Key
+				end
+
+				return a.Level > b.Level
+			end
+
+			return a.SizeRank > b.SizeRank
+		end
+
+		return a.Name < b.Name
+	end)
+
+	return pets
+end
+
+local function getPetTypes()
+	local seen = {}
+	local types = {}
+
+	for _, petInfo in ipairs(getAllPets()) do
+		if not seen[petInfo.Name] then
+			seen[petInfo.Name] = true
+			table.insert(types, petInfo.Name)
+		end
+	end
+
+	table.sort(types)
+
+	return types
+end
+
+local function getSelectedPetType()
+	local selected = State.SelectedPetTypeOption
+
+	if not selected or selected == "Select Pet" or selected == "No Pets Found" then
+		return nil
+	end
+
+	return PetTypeOptionMap[selected] or selected
+end
+
+local function getPetsByType(petType)
+	local pets = {}
+
+	for _, petInfo in ipairs(getAllPets()) do
+		if petInfo.Name == petType then
+			table.insert(pets, petInfo)
+		end
+	end
+
+	table.sort(pets, function(a, b)
+		if a.SizeRank == b.SizeRank then
+			if a.Level == b.Level then
+				return a.Key < b.Key
+			end
+
+			return a.Level > b.Level
+		end
+
+		return a.SizeRank > b.SizeRank
+	end)
+
+	return pets
+end
+
+local function getEquippedPets()
+	local equipped = {}
+	local plot = findMyPlot()
+
+	if not plot then
+		return equipped
+	end
+
+	for _, instance in ipairs(plot:GetChildren()) do
+		if instance.Name:sub(1, 4) == "Pet_" then
+			local petInfo = buildPetInfo(instance)
+
+			if petInfo then
+				table.insert(equipped, petInfo)
+			end
+		end
+	end
+
+	return equipped
+end
+
+local function formatPetMultiplier(value)
+	local number = tonumber(value) or 0
+
+	if number % 1 == 0 then
+		return tostring(number)
+	end
+
+	return string.format("%.2f", number):gsub("0+$", ""):gsub("%.$", "")
+end
+
+local function getEquippedPetsByFloorSummary()
+	local petsByFloor = {}
+	local total = 0
+
+	for _, petInfo in ipairs(getEquippedPets()) do
+		local floorIndex = petInfo.FloorIndex
+
+		if floorIndex < 1 then
+			floorIndex = 1
+		end
+
+		petsByFloor[floorIndex] = petsByFloor[floorIndex] or {}
+		table.insert(petsByFloor[floorIndex], petInfo)
+		total += 1
+	end
+
+	if total == 0 then
+		return "No equipped pets found."
+	end
+
+	local floorIndexes = {}
+
+	for floorIndex in pairs(petsByFloor) do
+		table.insert(floorIndexes, floorIndex)
+	end
+
+	table.sort(floorIndexes)
+
+	local lines = {}
+
+	for _, floorIndex in ipairs(floorIndexes) do
+		table.insert(lines, "Floor " .. tostring(floorIndex))
+
+		table.sort(petsByFloor[floorIndex], function(a, b)
+			if a.SizeRank == b.SizeRank then
+				if a.Level == b.Level then
+					return a.Name < b.Name
+				end
+
+				return a.Level > b.Level
+			end
+
+			return a.SizeRank > b.SizeRank
+		end)
+
+		for _, petInfo in ipairs(petsByFloor[floorIndex]) do
+			table.insert(
+				lines,
+				"- "
+					.. petInfo.Size
+					.. " "
+					.. petInfo.Name
+					.. " | Level "
+					.. tostring(petInfo.Level)
+					.. " | Earnings x"
+					.. formatPetMultiplier(petInfo.EarningsMultiplier)
+			)
+		end
+	end
+
+	return table.concat(lines, "\n")
+end
+
+local function unequipAllPets()
+	local remote = getUnequipPetRemote()
+
+	if not remote then
+		consoleWarn("[PETS] UnequipPet remote not found.")
+		return 0
+	end
+
+	local unequipped = 0
+
+	for _, petInfo in ipairs(getEquippedPets()) do
+		local ok, err = pcall(function()
+			remote:FireServer(petInfo.Key)
+		end)
+
+		if ok then
+			unequipped += 1
+		else
+			consoleWarn("[PETS UNEQUIP FAILED]", petInfo.Key, err)
+		end
+
+		task.wait(0.05)
+	end
+
+	return unequipped
+end
+
+local function equipPetByKey(remote, petKey)
+	local ok = pcall(function()
+		remote:FireServer(petKey)
+	end)
+
+	if ok then
+		return true
+	end
+
+	ok = pcall(function()
+		remote:FireServer()
+	end)
+
+	return ok
+end
+
+local function equipSelectedPetType()
+	local remote = getEquipPetRemote()
+	local petType = getSelectedPetType()
+
+	if not remote or not petType then
+		return 0
+	end
+
+	unequipAllPets()
+	task.wait(0.2)
+
+	local equipped = 0
+
+	for _, petInfo in ipairs(getPetsByType(petType)) do
+		if ENV.Stop then
+			break
+		end
+
+		if equipPetByKey(remote, petInfo.Key) then
+			equipped += 1
+		end
+
+		task.wait(0.05)
+	end
+
+	return equipped
+end
+
+local function upgradePetsOnce(quiet)
+	local remote = getUpgradePetRemote()
+	local petType = getSelectedPetType()
+
+	if not remote or not petType then
+		return 0
+	end
+
+	local targetLevel = math.clamp(math.floor(tonumber(State.PetUpgradeTargetLevel) or 50), 1, 50)
+	local upgraded = 0
+
+	for _, petInfo in ipairs(getPetsByType(petType)) do
+		if ENV.Stop then
+			break
+		end
+
+		if petInfo.Level < targetLevel then
+			local ok, err = pcall(function()
+				return remote:InvokeServer(petInfo.Key)
+			end)
+
+			if ok then
+				upgraded += 1
+			else
+				consoleWarn("[PETS UPGRADE FAILED]", petInfo.Key, err)
+			end
+
+			task.wait(0.1)
+		end
+	end
+
+	if not quiet and upgraded > 0 then
+		OrionLib:MakeNotification({
+			Name = "Pets",
+			Content = "Upgrade request sent for " .. tostring(upgraded) .. " " .. petType .. " pets.",
+			Time = 3,
+		})
+	end
+
+	return upgraded
 end
 
 local function getMyGearStockFolder()
@@ -3197,6 +3641,193 @@ local function setupAntiAFK()
 	end
 end
 
+local function buildPetsTab(PetsTab)
+	PetsTab:AddSection({
+		Name = "Equipped Pets",
+	})
+
+	local EquippedPetsLabel = PetsTab:AddParagraph("Pets By Floor", "Loading...")
+
+	local function updateEquippedPetsLabel()
+		EquippedPetsLabel:Set(getEquippedPetsByFloorSummary())
+	end
+
+	PetsTab:AddButton({
+		Name = "Refresh Equipped Pets",
+		Callback = function()
+			updateEquippedPetsLabel()
+		end,
+	})
+
+	PetsTab:AddSection({
+		Name = "Pet Equip",
+	})
+
+	local IsRefreshingPetTypeDropdown = false
+	local PetTypeDropdown
+	local SelectedPetTypeLabel = PetsTab:AddParagraph("Selected Pet", State.SelectedPetTypeOption or "None")
+
+	local function updateSelectedPetTypeLabel()
+		local petType = getSelectedPetType()
+
+		if not petType then
+			SelectedPetTypeLabel:Set("None")
+			return
+		end
+
+		local pets = getPetsByType(petType)
+		local best = pets[1]
+
+		if best then
+			SelectedPetTypeLabel:Set(
+				petType
+					.. " (x"
+					.. tostring(#pets)
+					.. ") | Best: "
+					.. best.Size
+					.. " Level "
+					.. tostring(best.Level)
+			)
+		else
+			SelectedPetTypeLabel:Set(petType)
+		end
+	end
+
+	PetTypeDropdown = PetsTab:AddDropdown({
+		Name = "Pet Type",
+		Default = "Select Pet",
+		Options = {
+			"Select Pet",
+		},
+		Callback = function(value)
+			if IsRefreshingPetTypeDropdown then
+				return
+			end
+
+			State.SelectedPetTypeOption = value
+			updateSelectedPetTypeLabel()
+			saveConfig()
+		end,
+	})
+
+	local function refreshPetTypeDropdown()
+		local petTypes = getPetTypes()
+		local options = {
+			"Select Pet",
+		}
+		PetTypeOptionMap = {}
+
+		for _, petType in ipairs(petTypes) do
+			table.insert(options, petType)
+			PetTypeOptionMap[petType] = petType
+		end
+
+		if #petTypes == 0 then
+			options = {
+				"No Pets Found",
+			}
+		end
+
+		IsRefreshingPetTypeDropdown = true
+		PetTypeDropdown:Refresh(options, true)
+		pcall(function()
+			if State.SelectedPetTypeOption and PetTypeOptionMap[State.SelectedPetTypeOption] then
+				PetTypeDropdown:Set(State.SelectedPetTypeOption)
+			elseif #petTypes == 0 then
+				PetTypeDropdown:Set("No Pets Found")
+			else
+				PetTypeDropdown:Set("Select Pet")
+			end
+		end)
+		IsRefreshingPetTypeDropdown = false
+		updateSelectedPetTypeLabel()
+		updateEquippedPetsLabel()
+	end
+
+	PetsTab:AddButton({
+		Name = "Refresh Pets",
+		Callback = function()
+			refreshPetTypeDropdown()
+		end,
+	})
+
+	PetsTab:AddButton({
+		Name = "Unequip All Pets",
+		Callback = function()
+			spawnOneShot(function()
+				local count = unequipAllPets()
+				updateEquippedPetsLabel()
+
+				OrionLib:MakeNotification({
+					Name = "Pets",
+					Content = "Unequipped " .. tostring(count) .. " pets.",
+					Time = 3,
+				})
+			end)
+		end,
+	})
+
+	PetsTab:AddButton({
+		Name = "Equip Selected Type",
+		Callback = function()
+			spawnOneShot(function()
+				local petType = getSelectedPetType()
+				local count = equipSelectedPetType()
+				updateEquippedPetsLabel()
+
+				OrionLib:MakeNotification({
+					Name = "Pets",
+					Content = "Equip request sent for "
+						.. tostring(count)
+						.. " "
+						.. tostring(petType or "selected")
+						.. " pets.",
+					Time = 3,
+				})
+			end)
+		end,
+	})
+
+	PetsTab:AddSection({
+		Name = "Pet Upgrades",
+	})
+
+	PetsTab:AddSlider({
+		Name = "Target Pet Level",
+		Min = 1,
+		Max = 50,
+		Default = State.PetUpgradeTargetLevel,
+		Increment = 1,
+		ValueName = "level",
+		Callback = function(value)
+			State.PetUpgradeTargetLevel = value
+			saveConfig()
+		end,
+	})
+
+	PetsTab:AddButton({
+		Name = "Upgrade Selected Pets Once",
+		Callback = function()
+			spawnOneShot(function()
+				upgradePetsOnce(false)
+			end)
+		end,
+	})
+
+	PetsTab:AddToggle({
+		Name = "Auto Upgrade Selected Pets",
+		Default = State.AutoUpgradePets,
+		Callback = function(value)
+			State.AutoUpgradePets = value
+			saveConfig()
+			consolePrint("[TOGGLE] Auto Upgrade Pets:", value)
+		end,
+	})
+
+	refreshPetTypeDropdown()
+	updateEquippedPetsLabel()
+end
+
 loadConfig()
 setupAntiAFK()
 
@@ -3233,6 +3864,12 @@ local function buildUI()
 	local PlotTab = Window:MakeTab({
 		Name = "Plot",
 		Icon = "sprout",
+		PremiumOnly = false,
+	})
+
+	local PetsTab = Window:MakeTab({
+		Name = "Pets",
+		Icon = "paw-print",
 		PremiumOnly = false,
 	})
 
@@ -4105,6 +4742,8 @@ local function buildUI()
 		end,
 	})
 
+	buildPetsTab(PetsTab)
+
 	--// EVENT TAB
 
 	EventTab:AddSection({
@@ -4455,6 +5094,17 @@ local function buildUI()
 				end
 
 				task.wait(0.02)
+			else
+				task.wait(0.25)
+			end
+		end
+	end)
+
+	spawnManaged(function()
+		while not ENV.Stop do
+			if State.AutoUpgradePets then
+				upgradePetsOnce(true)
+				task.wait(1)
 			else
 				task.wait(0.25)
 			end
