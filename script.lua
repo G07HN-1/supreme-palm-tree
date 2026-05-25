@@ -74,7 +74,24 @@ local GearStocksFolder = ReplicatedStorage:FindFirstChild("GearStocks")
 
 local OrionURL = "https://raw.githubusercontent.com/GhostDuckyy/UI-Libraries/refs/heads/main/Orion/source.lua"
 
-local OrionLib = loadstring(game:HttpGet(OrionURL))()
+local OrionPrelude = [[
+local syn = syn
+local gethui = gethui or function()
+	return game:GetService("CoreGui")
+end
+
+table.foreach = table.foreach or function(source, callback)
+	for key, value in pairs(source) do
+		callback(key, value)
+	end
+end
+
+if syn and type(syn.protect_gui) ~= "function" then
+	syn = nil
+end
+]]
+
+local OrionLib = loadstring(OrionPrelude .. game:HttpGet(OrionURL))()
 
 --// SETTINGS
 
@@ -1195,61 +1212,6 @@ local function shouldUseFarmFloor(floorInfo)
 	end
 
 	return State.SelectedPlotFloors[floorInfo.Name] == true
-end
-
-local function commitPlotFloorSelection()
-	invalidateFarmDirtCache()
-
-	if updateSelectedPlotFloorsLabel then
-		updateSelectedPlotFloorsLabel()
-	end
-
-	if updatePlantViewerLabel then
-		updatePlantViewerLabel(true)
-	end
-
-	saveConfig()
-end
-
-local function useAllPlotFloors()
-	State.SelectedPlotFloorOption = "All Floors"
-	State.SelectedPlotFloors = {
-		["All Floors"] = true,
-	}
-	commitPlotFloorSelection()
-end
-
-local function togglePlotFloor(floorName)
-	if not isValidPlotFloorOption(floorName) or floorName == "All Floors" then
-		useAllPlotFloors()
-		return
-	end
-
-	if State.SelectedPlotFloors["All Floors"] then
-		State.SelectedPlotFloors = {}
-	end
-
-	State.SelectedPlotFloors[floorName] = not State.SelectedPlotFloors[floorName]
-
-	if next(State.SelectedPlotFloors) == nil then
-		State.SelectedPlotFloors = {
-			["All Floors"] = true,
-		}
-		State.SelectedPlotFloorOption = "All Floors"
-	else
-		State.SelectedPlotFloorOption = floorName
-	end
-
-	commitPlotFloorSelection()
-end
-
-local function selectPlotFloorOption(value)
-	if value == "All Floors" then
-		useAllPlotFloors()
-		return
-	end
-
-	togglePlotFloor(value)
 end
 
 local function getNestedChild(root, path)
@@ -3307,7 +3269,38 @@ PlotTab:AddDropdown({
 			return
 		end
 
-		selectPlotFloorOption(value)
+		State.SelectedPlotFloorOption = value
+
+		if value == "All Floors" then
+			State.SelectedPlotFloors = {
+				["All Floors"] = true,
+			}
+		else
+			if State.SelectedPlotFloors["All Floors"] then
+				State.SelectedPlotFloors = {}
+			end
+
+			State.SelectedPlotFloors[value] = not State.SelectedPlotFloors[value]
+
+			if next(State.SelectedPlotFloors) == nil then
+				State.SelectedPlotFloorOption = "All Floors"
+				State.SelectedPlotFloors = {
+					["All Floors"] = true,
+				}
+			end
+		end
+
+		invalidateFarmDirtCache()
+
+		if updateSelectedPlotFloorsLabel then
+			updateSelectedPlotFloorsLabel()
+		end
+
+		if updatePlantViewerLabel then
+			updatePlantViewerLabel(true)
+		end
+
+		saveConfig()
 	end,
 })
 
