@@ -124,6 +124,7 @@ local State = {
 	AutoPlantSeeds = false,
 	AutoPlantRushShoot = false,
 	AutoPlantRushPickup = false,
+	AutoQueenBeeHoneycomb = false,
 	AntiAFK = true,
 
 	SelectedSeedOption = nil,
@@ -749,6 +750,7 @@ local function getConfigData()
 		AutoPlantSeeds = State.AutoPlantSeeds,
 		AutoPlantRushShoot = State.AutoPlantRushShoot,
 		AutoPlantRushPickup = State.AutoPlantRushPickup,
+		AutoQueenBeeHoneycomb = State.AutoQueenBeeHoneycomb,
 		AntiAFK = State.AntiAFK,
 		SelectedSeedOption = State.SelectedSeedOption,
 		SelectedSeeds = getSelectedSeedList(),
@@ -823,6 +825,7 @@ local function loadConfig()
 		"AutoPlantSeeds",
 		"AutoPlantRushShoot",
 		"AutoPlantRushPickup",
+		"AutoQueenBeeHoneycomb",
 		"AntiAFK",
 		"WebhookSeedPurchases",
 		"WebhookExpensiveGear",
@@ -1970,6 +1973,95 @@ local function shootPlantRushTargetsOnce()
 	end
 
 	return shotCount
+end
+
+local function getQueenBeeHoneycombFolder()
+	local interactiveEvents = Workspace:FindFirstChild("InteractiveEvents")
+	local queenBee = interactiveEvents and interactiveEvents:FindFirstChild("QueenBee")
+
+	return queenBee and queenBee:FindFirstChild("RuntimeHoneycombs")
+end
+
+local function getCharacterRoot()
+	local character = LocalPlayer.Character
+
+	return character and character:FindFirstChild("HumanoidRootPart")
+end
+
+local function getPromptPart(prompt)
+	local current = prompt and prompt.Parent
+
+	while current do
+		if current:IsA("BasePart") then
+			return current
+		end
+
+		current = current.Parent
+	end
+
+	return nil
+end
+
+local function movePromptNearCharacter(prompt, index)
+	local root = getCharacterRoot()
+	local promptPart = getPromptPart(prompt)
+
+	if not root or not promptPart then
+		return false
+	end
+
+	local offsetX = ((index - 1) % 3 - 1) * 2
+	local offsetZ = -4 - math.floor((index - 1) / 3) * 1.5
+
+	pcall(function()
+		promptPart.Anchored = true
+		promptPart.CFrame = root.CFrame * CFrame.new(offsetX, 0, offsetZ)
+	end)
+
+	return true
+end
+
+local function collectQueenBeeHoneycombsOnce()
+	if type(fireproximityprompt) ~= "function" then
+		return 0
+	end
+
+	local folder = getQueenBeeHoneycombFolder()
+
+	if not folder then
+		return 0
+	end
+
+	local collected = 0
+	local promptIndex = 0
+
+	for _, honeycombModel in ipairs(folder:GetChildren()) do
+		if ENV.Stop or not State.AutoQueenBeeHoneycomb then
+			break
+		end
+
+		local prompt = honeycombModel:FindFirstChild("CollectPrompt", true)
+
+		if prompt and prompt:IsA("ProximityPrompt") and prompt.Enabled then
+			promptIndex += 1
+
+			local ok, err = pcall(function()
+				movePromptNearCharacter(prompt, promptIndex)
+				prompt.RequiresLineOfSight = false
+				prompt.MaxActivationDistance = math.max(prompt.MaxActivationDistance, 30)
+				prompt.HoldDuration = 0
+				fireproximityprompt(prompt)
+			end)
+
+			if ok then
+				collected += 1
+			else
+				consoleWarn("[EVENT HONEYCOMB FAILED]", err)
+			end
+		end
+	end
+
+	return collected
 end
 
 local function getMyGearStockFolder()
@@ -4039,6 +4131,20 @@ local function buildUI()
 		end,
 	})
 
+	EventTab:AddSection({
+		Name = "Queen Bee",
+	})
+
+	EventTab:AddToggle({
+		Name = "Auto Collect Honeycomb",
+		Default = State.AutoQueenBeeHoneycomb,
+		Callback = function(value)
+			State.AutoQueenBeeHoneycomb = value
+			saveConfig()
+			consolePrint("[TOGGLE] Auto QueenBee Honeycomb:", value)
+		end,
+	})
+
 	--// AUTO BUY TAB
 
 	AutoBuyTab:AddSection({
@@ -4349,6 +4455,17 @@ local function buildUI()
 				end
 
 				task.wait(0.02)
+			else
+				task.wait(0.25)
+			end
+		end
+	end)
+
+	spawnManaged(function()
+		while not ENV.Stop do
+			if State.AutoQueenBeeHoneycomb then
+				collectQueenBeeHoneycombsOnce()
+				task.wait(0.5)
 			else
 				task.wait(0.25)
 			end
