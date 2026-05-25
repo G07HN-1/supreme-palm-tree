@@ -1243,6 +1243,15 @@ local function togglePlotFloor(floorName)
 	commitPlotFloorSelection()
 end
 
+local function selectPlotFloorOption(value)
+	if value == "All Floors" then
+		useAllPlotFloors()
+		return
+	end
+
+	togglePlotFloor(value)
+end
+
 local function getNestedChild(root, path)
 	local current = root
 
@@ -3284,6 +3293,24 @@ PlotTab:AddSection({
 	Name = "Floor Filter",
 })
 
+PlotTab:AddDropdown({
+	Name = "Floor Selector",
+	Default = getSafeDropdownDefault(PlotFloorOptions, State.SelectedPlotFloorOption, "All Floors"),
+	Options = {
+		"All Floors",
+		"Floor 1",
+		"Floor 2",
+		"Floor 3",
+	},
+	Callback = function(value)
+		if not isValidPlotFloorOption(value) then
+			return
+		end
+
+		selectPlotFloorOption(value)
+	end,
+})
+
 SelectedPlotFloorsLabel = PlotTab:AddParagraph("Selected Floors", "All Floors")
 
 function updateSelectedPlotFloorsLabel()
@@ -3293,34 +3320,6 @@ function updateSelectedPlotFloorsLabel()
 
 	SelectedPlotFloorsLabel:Set(table.concat(getSelectedPlotFloorList(), ", "))
 end
-
-PlotTab:AddButton({
-	Name = "Use All Floors",
-	Callback = function()
-		useAllPlotFloors()
-	end,
-})
-
-PlotTab:AddButton({
-	Name = "Toggle Floor 1",
-	Callback = function()
-		togglePlotFloor("Floor 1")
-	end,
-})
-
-PlotTab:AddButton({
-	Name = "Toggle Floor 2",
-	Callback = function()
-		togglePlotFloor("Floor 2")
-	end,
-})
-
-PlotTab:AddButton({
-	Name = "Toggle Floor 3",
-	Callback = function()
-		togglePlotFloor("Floor 3")
-	end,
-})
 
 PlotTab:AddSection({
 	Name = "Plant Viewer",
