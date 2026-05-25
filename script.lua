@@ -1197,6 +1197,52 @@ local function shouldUseFarmFloor(floorInfo)
 	return State.SelectedPlotFloors[floorInfo.Name] == true
 end
 
+local function commitPlotFloorSelection()
+	invalidateFarmDirtCache()
+
+	if updateSelectedPlotFloorsLabel then
+		updateSelectedPlotFloorsLabel()
+	end
+
+	if updatePlantViewerLabel then
+		updatePlantViewerLabel(true)
+	end
+
+	saveConfig()
+end
+
+local function useAllPlotFloors()
+	State.SelectedPlotFloorOption = "All Floors"
+	State.SelectedPlotFloors = {
+		["All Floors"] = true,
+	}
+	commitPlotFloorSelection()
+end
+
+local function togglePlotFloor(floorName)
+	if not isValidPlotFloorOption(floorName) or floorName == "All Floors" then
+		useAllPlotFloors()
+		return
+	end
+
+	if State.SelectedPlotFloors["All Floors"] then
+		State.SelectedPlotFloors = {}
+	end
+
+	State.SelectedPlotFloors[floorName] = not State.SelectedPlotFloors[floorName]
+
+	if next(State.SelectedPlotFloors) == nil then
+		State.SelectedPlotFloors = {
+			["All Floors"] = true,
+		}
+		State.SelectedPlotFloorOption = "All Floors"
+	else
+		State.SelectedPlotFloorOption = floorName
+	end
+
+	commitPlotFloorSelection()
+end
+
 local function getNestedChild(root, path)
 	local current = root
 
@@ -3248,48 +3294,31 @@ function updateSelectedPlotFloorsLabel()
 	SelectedPlotFloorsLabel:Set(table.concat(getSelectedPlotFloorList(), ", "))
 end
 
-PlotTab:AddDropdown({
-	Name = "Floor Dropdown",
-	Default = getSafeDropdownDefault(PlotFloorOptions, State.SelectedPlotFloorOption, "All Floors"),
-	Options = PlotFloorOptions,
-	Callback = function(value)
-		State.SelectedPlotFloorOption = value
-
-		if value == "All Floors" then
-			State.SelectedPlotFloors = {
-				["All Floors"] = true,
-			}
-		elseif isValidPlotFloorOption(value) then
-			State.SelectedPlotFloors["All Floors"] = nil
-			State.SelectedPlotFloors[value] = true
-		end
-
-		invalidateFarmDirtCache()
-		updateSelectedPlotFloorsLabel()
-
-		if updatePlantViewerLabel then
-			updatePlantViewerLabel(true)
-		end
-
-		saveConfig()
+PlotTab:AddButton({
+	Name = "Use All Floors",
+	Callback = function()
+		useAllPlotFloors()
 	end,
 })
 
 PlotTab:AddButton({
-	Name = "Use All Floors",
+	Name = "Toggle Floor 1",
 	Callback = function()
-		State.SelectedPlotFloorOption = "All Floors"
-		State.SelectedPlotFloors = {
-			["All Floors"] = true,
-		}
-		invalidateFarmDirtCache()
-		updateSelectedPlotFloorsLabel()
+		togglePlotFloor("Floor 1")
+	end,
+})
 
-		if updatePlantViewerLabel then
-			updatePlantViewerLabel(true)
-		end
+PlotTab:AddButton({
+	Name = "Toggle Floor 2",
+	Callback = function()
+		togglePlotFloor("Floor 2")
+	end,
+})
 
-		saveConfig()
+PlotTab:AddButton({
+	Name = "Toggle Floor 3",
+	Callback = function()
+		togglePlotFloor("Floor 3")
 	end,
 })
 
