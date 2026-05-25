@@ -62,6 +62,7 @@ local UseSprayRemote = Remotes:FindFirstChild("UseSpray")
 local PlantSeedRemote = Remotes:FindFirstChild("PlantSeed")
 local PlantRushRemote = Remotes:FindFirstChild("PlantRush")
 local PlantRushShootRemote = PlantRushRemote and PlantRushRemote:FindFirstChild("Shoot")
+local PlantRushDropClaimRemote = PlantRushRemote and PlantRushRemote:FindFirstChild("DropClaim")
 
 local GearRemote = Remotes:FindFirstChild("Gear")
 local GearTransaction = GearRemote and GearRemote:FindFirstChild("Transaction")
@@ -122,6 +123,7 @@ local State = {
 	AutoSprayPlants = false,
 	AutoPlantSeeds = false,
 	AutoPlantRushShoot = false,
+	AutoPlantRushPickup = false,
 	AntiAFK = true,
 
 	SelectedSeedOption = nil,
@@ -178,6 +180,7 @@ local FarmDirtCacheTime = 0
 local PlantRushTargetRoots = {}
 local PlantRushTargetCacheTime = 0
 local LastPlantRushRemoteWarn = 0
+local LastPlantRushDropClaimTime = 0
 local GearBuyItemDelay = 0.2
 local EggBuyItemDelay = 0.2
 local PlantUpgradePassDuration = 2.5
@@ -185,6 +188,8 @@ local PlantUpgradeBatchSize = 30
 local PlantRemovePassDuration = 5
 local FarmDirtCacheTTL = 5
 local PlantRushTargetCacheTTL = 0.4
+local PlantRushShotRepeats = 2
+local PlantRushDropClaimCooldown = 0.4
 local FarmFloorPaths = {
 	{
 		Name = "Floor 1",
@@ -743,6 +748,7 @@ local function getConfigData()
 		AutoSprayPlants = State.AutoSprayPlants,
 		AutoPlantSeeds = State.AutoPlantSeeds,
 		AutoPlantRushShoot = State.AutoPlantRushShoot,
+		AutoPlantRushPickup = State.AutoPlantRushPickup,
 		AntiAFK = State.AntiAFK,
 		SelectedSeedOption = State.SelectedSeedOption,
 		SelectedSeeds = getSelectedSeedList(),
@@ -816,6 +822,7 @@ local function loadConfig()
 		"AutoSprayPlants",
 		"AutoPlantSeeds",
 		"AutoPlantRushShoot",
+		"AutoPlantRushPickup",
 		"AntiAFK",
 		"WebhookSeedPurchases",
 		"WebhookExpensiveGear",
@@ -844,6 +851,7 @@ local function loadConfig()
 
 	State.PlantUpgradeTargetLevel = math.clamp(math.floor(State.PlantUpgradeTargetLevel), 1, 100)
 	State.PlantUpgradeDelay = math.max(1, tonumber(State.PlantUpgradeDelay) or 1)
+	State.CompostDelay = math.clamp(tonumber(State.CompostDelay) or 5, 0.1, 5)
 
 	if type(data.WebhookURL) == "string" then
 		State.WebhookURL = data.WebhookURL
@@ -1219,6 +1227,17 @@ local function getPlantRushShootRemote()
 	PlantRushShootRemote = PlantRushRemote and PlantRushRemote:FindFirstChild("Shoot")
 
 	return PlantRushShootRemote
+end
+
+local function getPlantRushDropClaimRemote()
+	if PlantRushDropClaimRemote and PlantRushDropClaimRemote.Parent then
+		return PlantRushDropClaimRemote
+	end
+
+	PlantRushRemote = PlantRushRemote or Remotes:FindFirstChild("PlantRush")
+	PlantRushDropClaimRemote = PlantRushRemote and PlantRushRemote:FindFirstChild("DropClaim")
+
+	return PlantRushDropClaimRemote
 end
 
 local function invalidateFarmDirtCache()
@@ -1849,6 +1868,47 @@ local function getPlantRushTargetRoots(forceRefresh)
 	return PlantRushTargetRoots
 end
 
+local function claimPlantRushDropsOnce()
+	local now = os.clock()
+
+	if now - LastPlantRushDropClaimTime < PlantRushDropClaimCooldown then
+		return 0
+	end
+
+	LastPlantRushDropClaimTime = now
+
+	local remote = getPlantRushDropClaimRemote()
+
+	if not remote then
+		return 0
+	end
+
+	local claimed = 0
+
+	for left = 1, 9 do
+		for right = 1, 9 do
+			if ENV.Stop or not State.AutoPlantRushShoot or not State.AutoPlantRushPickup then
+				return claimed
+			end
+
+			local key = tostring(left) .. "_" .. tostring(right)
+			local ok, err = pcall(function()
+				remote:FireServer(key)
+			end)
+
+			if ok then
+				claimed += 1
+			else
+				consoleWarn("[EVENT PICKUP FAILED]", key, err)
+			end
+		end
+
+		task.wait()
+	end
+
+	return claimed
+end
+
 local function shootPlantRushTargetsOnce()
 	local remote = getPlantRushShootRemote()
 
@@ -1894,18 +1954,19 @@ local function shootPlantRushTargetsOnce()
 
 		if offset.Magnitude > 0 then
 			local direction = offset.Unit
-			local ok, err = pcall(function()
-				remote:FireServer(origin, direction, targetPosition)
-			end)
 
-			if ok then
-				shotCount += 1
-			else
-				consoleWarn("[EVENT SHOOT FAILED]", err)
+			for _ = 1, PlantRushShotRepeats do
+				local ok, err = pcall(function()
+					remote:FireServer(origin, direction, targetPosition)
+				end)
+
+				if ok then
+					shotCount += 1
+				else
+					consoleWarn("[EVENT SHOOT FAILED]", err)
+				end
 			end
 		end
-
-		task.wait(0.01)
 	end
 
 	return shotCount
@@ -3546,10 +3607,10 @@ local function buildUI()
 
 	CompostTab:AddSlider({
 		Name = "Compost Loop Delay",
-		Min = 1,
-		Max = 120,
+		Min = 0.1,
+		Max = 5,
 		Default = State.CompostDelay,
-		Increment = 1,
+		Increment = 0.1,
 		ValueName = "sec",
 		Callback = function(value)
 			State.CompostDelay = value
@@ -3968,6 +4029,16 @@ local function buildUI()
 		end,
 	})
 
+	EventTab:AddToggle({
+		Name = "Auto Pickup",
+		Default = State.AutoPlantRushPickup,
+		Callback = function(value)
+			State.AutoPlantRushPickup = value
+			saveConfig()
+			consolePrint("[TOGGLE] Auto PlantRush Pickup:", value)
+		end,
+	})
+
 	--// AUTO BUY TAB
 
 	AutoBuyTab:AddSection({
@@ -4224,7 +4295,7 @@ local function buildUI()
 		while not ENV.Stop do
 			if State.AutoCompost then
 				compostSelectedSeedsOnce(true)
-				task.wait(math.max(1, State.CompostDelay))
+				task.wait(math.max(0.1, State.CompostDelay))
 			else
 				task.wait(0.25)
 			end
@@ -4271,8 +4342,13 @@ local function buildUI()
 	spawnManaged(function()
 		while not ENV.Stop do
 			if State.AutoPlantRushShoot then
-				shootPlantRushTargetsOnce()
-				task.wait(0.03)
+				local shotCount = shootPlantRushTargetsOnce()
+
+				if shotCount > 0 and State.AutoPlantRushPickup then
+					claimPlantRushDropsOnce()
+				end
+
+				task.wait(0.02)
 			else
 				task.wait(0.25)
 			end
