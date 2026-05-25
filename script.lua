@@ -48,6 +48,10 @@ local Workspace = game:GetService("Workspace")
 
 local LocalPlayer = Players.LocalPlayer
 
+if not game:IsLoaded() then
+	game.Loaded:Wait()
+end
+
 local Remotes = ReplicatedStorage:WaitForChild("Remotes")
 local RollSeedsRemote = Remotes:WaitForChild("RollSeeds")
 local BuySeedRemote = Remotes:WaitForChild("BuySeed")
@@ -76,11 +80,18 @@ local OrionURL = "https://raw.githubusercontent.com/GhostDuckyy/UI-Libraries/ref
 
 local OrionPrelude = [[
 local syn = syn
+local baseTable = table
+local table = {}
+
+for key, value in pairs(baseTable) do
+	table[key] = value
+end
+
 local gethui = gethui or function()
 	return game:GetService("CoreGui")
 end
 
-table.foreach = table.foreach or function(source, callback)
+table.foreach = function(source, callback)
 	for key, value in pairs(source) do
 		callback(key, value)
 	end
@@ -126,7 +137,6 @@ local State = {
 		["All Floors"] = true,
 	},
 
-	SaveConfigEnabled = true,
 	RollDelay = 1.25,
 	GearDelay = 30,
 	EggDelay = 30,
@@ -195,6 +205,7 @@ local IsUpgradingPlants = false
 local IsRemovingPlants = false
 local IsSprayingPlants = false
 local IsPlantingSeeds = false
+local LastPlotNotReadyLog = 0
 
 local SeedRarityOptions = {
 	"Select Rarity",
@@ -380,7 +391,6 @@ local StatsEggsLabel
 local updateStatsLabels
 local PlantViewerLabel
 local updatePlantViewerLabel
-local SelectedPlotFloorsLabel
 local updateSelectedPlotFloorsLabel
 
 local function incrementCount(map, key)
@@ -712,7 +722,6 @@ end
 
 local function getConfigData()
 	return {
-		SaveConfigEnabled = State.SaveConfigEnabled,
 		AutoRoll = State.AutoRoll,
 		AutoBuySelectedSeeds = State.AutoBuySelectedSeeds,
 		AutoBuySelectedSeedRarities = State.AutoBuySelectedSeedRarities,
@@ -755,7 +764,7 @@ local function getConfigData()
 	}
 end
 
-local function saveConfig(force)
+local function saveConfig()
 	if not canUseFileConfig() then
 		consoleWarn("[CONFIG] File config functions are not available.")
 		return
@@ -785,7 +794,6 @@ local function loadConfig()
 	end
 
 	for _, key in ipairs({
-		"SaveConfigEnabled",
 		"AutoRoll",
 		"AutoBuySelectedSeeds",
 		"AutoBuySelectedSeedRarities",
@@ -824,7 +832,7 @@ local function loadConfig()
 	end
 
 	State.PlantUpgradeTargetLevel = math.clamp(math.floor(State.PlantUpgradeTargetLevel), 1, 100)
-	State.PlantUpgradeDelay = math.max(2.5, tonumber(State.PlantUpgradeDelay) or 2.5)
+	State.PlantUpgradeDelay = math.max(1, tonumber(State.PlantUpgradeDelay) or 1)
 
 	if type(data.WebhookURL) == "string" then
 		State.WebhookURL = data.WebhookURL
@@ -1214,6 +1222,45 @@ local function shouldUseFarmFloor(floorInfo)
 	return State.SelectedPlotFloors[floorInfo.Name] == true
 end
 
+local function selectPlotFloorOption(value)
+	if not isValidPlotFloorOption(value) then
+		return
+	end
+
+	State.SelectedPlotFloorOption = value
+
+	if value == "All Floors" then
+		State.SelectedPlotFloors = {
+			["All Floors"] = true,
+		}
+	else
+		if State.SelectedPlotFloors["All Floors"] then
+			State.SelectedPlotFloors = {}
+		end
+
+		State.SelectedPlotFloors[value] = not State.SelectedPlotFloors[value]
+
+		if next(State.SelectedPlotFloors) == nil then
+			State.SelectedPlotFloorOption = "All Floors"
+			State.SelectedPlotFloors = {
+				["All Floors"] = true,
+			}
+		end
+	end
+
+	invalidateFarmDirtCache()
+
+	if updateSelectedPlotFloorsLabel then
+		updateSelectedPlotFloorsLabel()
+	end
+
+	if updatePlantViewerLabel then
+		updatePlantViewerLabel(true)
+	end
+
+	saveConfig()
+end
+
 local function getNestedChild(root, path)
 	local current = root
 
@@ -1297,6 +1344,52 @@ local function getFarmDirts(forceRefresh)
 	FarmDirtCacheTime = now
 
 	return dirts
+end
+
+local function isPlotReadyForActions(forceRefresh)
+	local map = Workspace:FindFirstChild("Map")
+	local plots = map and map:FindFirstChild("Plots")
+
+	if not plots then
+		return false, "Waiting for map plots to load."
+	end
+
+	local plot = findMyPlot()
+
+	if not plot then
+		return false, "Waiting for your plot to load."
+	end
+
+	if #getFarmDirts(forceRefresh == true) == 0 then
+		return false, "Waiting for selected farm floors to load."
+	end
+
+	return true
+end
+
+local function canRunPlotAction(quiet, actionName)
+	local ready, reason = isPlotReadyForActions(false)
+
+	if ready then
+		return true
+	end
+
+	local now = os.clock()
+
+	if now - LastPlotNotReadyLog > 5 then
+		LastPlotNotReadyLog = now
+		consolePrint("[PLOT]", reason)
+	end
+
+	if not quiet then
+		OrionLib:MakeNotification({
+			Name = actionName or "Plot",
+			Content = reason,
+			Time = 3,
+		})
+	end
+
+	return false
 end
 
 local function isPlantedDirt(dirt)
@@ -1406,6 +1499,12 @@ local function getPlacedPlantSummary(forceRefresh)
 end
 
 local function formatPlacedPlantSummary(forceRefresh)
+	local ready, reason = isPlotReadyForActions(forceRefresh == true)
+
+	if not ready then
+		return reason
+	end
+
 	local entries, total = getPlacedPlantSummary(forceRefresh)
 
 	if total == 0 then
@@ -2351,6 +2450,10 @@ local function upgradePlantsOnce(quiet)
 		return 0
 	end
 
+	if not canRunPlotAction(quiet, "Plant Upgrade Pass") then
+		return 0
+	end
+
 	IsUpgradingPlants = true
 
 	local remote = getUpgradePlantRemote()
@@ -2436,6 +2539,10 @@ local function removeAllPlants()
 		return 0
 	end
 
+	if not canRunPlotAction(false, "Remove Plants") then
+		return 0
+	end
+
 	IsRemovingPlants = true
 
 	local remote = getRemovePlantRemote()
@@ -2506,6 +2613,10 @@ local function sprayPlantsOnce(quiet)
 			})
 		end
 
+		return 0
+	end
+
+	if not canRunPlotAction(quiet, "Plant Spray") then
 		return 0
 	end
 
@@ -2617,6 +2728,10 @@ local function plantSeedsOnce(quiet)
 			})
 		end
 
+		return 0
+	end
+
+	if not canRunPlotAction(quiet, "Plant Seeds") then
 		return 0
 	end
 
@@ -2748,1332 +2863,1231 @@ setupAntiAFK()
 
 --// UI
 
-local Window = OrionLib:MakeWindow({
-	Name = "Fortune Auto Tool",
-	HidePremium = true,
-	SaveConfig = false,
-	ConfigFolder = "FortuneAutoTool",
-	IntroEnabled = true,
-	IntroText = "Fortune Tool Loaded",
-})
+local function buildUI()
+	local Window = OrionLib:MakeWindow({
+		Name = "Fortune Auto Tool",
+		HidePremium = true,
+		SaveConfig = false,
+		ConfigFolder = "FortuneAutoTool",
+		IntroEnabled = true,
+		IntroText = "Fortune Tool Loaded",
+	})
 
-local SeedsTab = Window:MakeTab({
-	Name = "Seeds",
-	Icon = "leaf",
-	PremiumOnly = false,
-})
+	local SeedsTab = Window:MakeTab({
+		Name = "Seeds",
+		Icon = "leaf",
+		PremiumOnly = false,
+	})
 
-local EggsTab = Window:MakeTab({
-	Name = "Eggs",
-	Icon = "egg",
-	PremiumOnly = false,
-})
+	local EggsTab = Window:MakeTab({
+		Name = "Eggs",
+		Icon = "egg",
+		PremiumOnly = false,
+	})
 
-local CompostTab = Window:MakeTab({
-	Name = "Compost",
-	Icon = "recycle",
-	PremiumOnly = false,
-})
+	local CompostTab = Window:MakeTab({
+		Name = "Compost",
+		Icon = "recycle",
+		PremiumOnly = false,
+	})
 
-local PlotTab = Window:MakeTab({
-	Name = "Plot",
-	Icon = "sprout",
-	PremiumOnly = false,
-})
+	local PlotTab = Window:MakeTab({
+		Name = "Plot",
+		Icon = "sprout",
+		PremiumOnly = false,
+	})
 
-local AutoBuyTab = Window:MakeTab({
-	Name = "Auto Buy",
-	Icon = "shopping-cart",
-	PremiumOnly = false,
-})
+	local AutoBuyTab = Window:MakeTab({
+		Name = "Auto Buy",
+		Icon = "shopping-cart",
+		PremiumOnly = false,
+	})
 
-local StatsTab = Window:MakeTab({
-	Name = "Stats",
-	Icon = "bar-chart",
-	PremiumOnly = false,
-})
+	local StatsTab = Window:MakeTab({
+		Name = "Stats",
+		Icon = "bar-chart",
+		PremiumOnly = false,
+	})
 
-local SettingsTab = Window:MakeTab({
-	Name = "Settings",
-	Icon = "settings",
-	PremiumOnly = false,
-})
+	local SettingsTab = Window:MakeTab({
+		Name = "Settings",
+		Icon = "settings",
+		PremiumOnly = false,
+	})
 
---// SEEDS TAB
+	--// SEEDS TAB
 
-SeedsTab:AddSection({
-	Name = "Seed Roller",
-})
+	SeedsTab:AddSection({
+		Name = "Seed Roller",
+	})
 
-local IsRefreshingSeedDropdown = false
-local SelectedSeedsLabel
-local updateSelectedSeedsLabel
-local SelectedSeedRaritiesLabel
-local updateSelectedSeedRaritiesLabel
+	local IsRefreshingSeedDropdown = false
+	local SelectedSeedsLabel
+	local updateSelectedSeedsLabel
+	local SelectedSeedRaritiesLabel
+	local updateSelectedSeedRaritiesLabel
 
-SelectedSeedsLabel = SeedsTab:AddParagraph("Selected Seeds", "None")
+	SelectedSeedsLabel = SeedsTab:AddParagraph("Selected Seeds", "None")
 
-function updateSelectedSeedsLabel()
-	if not SelectedSeedsLabel then
-		return
-	end
-
-	local names = getSelectedSeedList()
-
-	if #names == 0 then
-		SelectedSeedsLabel:Set("None")
-	else
-		SelectedSeedsLabel:Set(table.concat(names, ", "))
-	end
-end
-
-local SeedDropdown = SeedsTab:AddDropdown({
-	Name = "Seeds Dropdown",
-	Default = "Select Seed",
-	Options = {
-		"Select Seed",
-	},
-	Callback = function(value)
-		State.SelectedSeedOption = value
-
-		if IsRefreshingSeedDropdown then
+	function updateSelectedSeedsLabel()
+		if not SelectedSeedsLabel then
 			return
 		end
 
-		local seedName = SeedOptionMap[value]
+		local names = getSelectedSeedList()
 
-		if not seedName then
-			return
-		end
-
-		State.SelectedSeeds[seedName] = true
-		updateSelectedSeedsLabel()
-		saveConfig()
-
-		OrionLib:MakeNotification({
-			Name = "Seed Selected",
-			Content = seedName .. " was added to selected seeds.",
-			Time = 3,
-		})
-	end,
-})
-
-SeedsTab:AddSection({
-	Name = "Seed Rarity Filter",
-})
-
-SelectedSeedRaritiesLabel = SeedsTab:AddParagraph("Selected Rarities", "None")
-
-function updateSelectedSeedRaritiesLabel()
-	if not SelectedSeedRaritiesLabel then
-		return
-	end
-
-	local rarities = getSelectedSeedRarityList()
-
-	if #rarities == 0 then
-		SelectedSeedRaritiesLabel:Set("None")
-	else
-		SelectedSeedRaritiesLabel:Set(table.concat(rarities, ", "))
-	end
-end
-
-SeedsTab:AddDropdown({
-	Name = "Rarity Selector",
-	Default = getSafeDropdownDefault(SeedRarityOptions, State.SelectedSeedRarityOption, "Select Rarity"),
-	Options = SeedRarityOptions,
-	Callback = function(value)
-		State.SelectedSeedRarityOption = value
-
-		if value == "Select Rarity" then
-			saveConfig()
-			return
-		end
-
-		State.SelectedSeedRarities[value] = true
-		updateSelectedSeedRaritiesLabel()
-		saveConfig()
-
-		OrionLib:MakeNotification({
-			Name = "Rarity Selected",
-			Content = value .. " seeds will be bought when rolled.",
-			Time = 3,
-		})
-	end,
-})
-
-SeedsTab:AddButton({
-	Name = "Clear Selected Rarities",
-	Callback = function()
-		table.clear(State.SelectedSeedRarities)
-		updateSelectedSeedRaritiesLabel()
-		saveConfig()
-
-		OrionLib:MakeNotification({
-			Name = "Cleared",
-			Content = "Selected seed rarities cleared.",
-			Time = 3,
-		})
-	end,
-})
-
-SeedsTab:AddToggle({
-	Name = "Auto Buy Selected Rarities",
-	Default = State.AutoBuySelectedSeedRarities,
-	Callback = function(value)
-		State.AutoBuySelectedSeedRarities = value
-		saveConfig()
-		consolePrint("[TOGGLE] Auto Buy Selected Seed Rarities:", value)
-	end,
-})
-
-local function refreshSeedDropdown()
-	local seedNames = getSeedNames()
-	local options = {
-		"Select Seed",
-	}
-	SeedOptionMap = {}
-
-	for _, seedName in ipairs(seedNames) do
-		table.insert(options, seedName)
-		SeedOptionMap[seedName] = seedName
-	end
-
-	if #seedNames == 0 then
-		options = {
-			"No Seeds Found",
-		}
-	end
-
-	IsRefreshingSeedDropdown = true
-	SeedDropdown:Refresh(options, true)
-	pcall(function()
-		if State.SelectedSeedOption and SeedOptionMap[State.SelectedSeedOption] then
-			SeedDropdown:Set(State.SelectedSeedOption)
+		if #names == 0 then
+			SelectedSeedsLabel:Set("None")
 		else
-			SeedDropdown:Set("Select Seed")
+			SelectedSeedsLabel:Set(table.concat(names, ", "))
 		end
-	end)
-	IsRefreshingSeedDropdown = false
-end
-
-SeedsTab:AddButton({
-	Name = "Clear Selected Seeds",
-	Callback = function()
-		table.clear(State.SelectedSeeds)
-		updateSelectedSeedsLabel()
-		saveConfig()
-
-		OrionLib:MakeNotification({
-			Name = "Cleared",
-			Content = "Selected seed list cleared.",
-			Time = 3,
-		})
-	end,
-})
-
-SeedsTab:AddToggle({
-	Name = "Auto Buy Selected Seeds",
-	Default = State.AutoBuySelectedSeeds,
-	Callback = function(value)
-		State.AutoBuySelectedSeeds = value
-		saveConfig()
-		consolePrint("[TOGGLE] Auto Buy Selected Seeds:", value)
-	end,
-})
-
-SeedsTab:AddToggle({
-	Name = "Auto Roll",
-	Default = State.AutoRoll,
-	Callback = function(value)
-		State.AutoRoll = value
-		saveConfig()
-		consolePrint("[TOGGLE] Auto Roll:", value)
-	end,
-})
-
---// EGGS TAB
-
-EggsTab:AddSection({
-	Name = "Pet Merchant",
-})
-
-local SelectedEggRaritiesLabel
-local updateSelectedEggRaritiesLabel
-
-SelectedEggRaritiesLabel = EggsTab:AddParagraph("Selected Egg Rarities", "None")
-
-function updateSelectedEggRaritiesLabel()
-	if not SelectedEggRaritiesLabel then
-		return
 	end
 
-	local rarities = getSelectedEggRarityList()
+	local SeedDropdown = SeedsTab:AddDropdown({
+		Name = "Seeds Dropdown",
+		Default = "Select Seed",
+		Options = {
+			"Select Seed",
+		},
+		Callback = function(value)
+			State.SelectedSeedOption = value
 
-	if #rarities == 0 then
-		SelectedEggRaritiesLabel:Set("None")
-	else
-		SelectedEggRaritiesLabel:Set(table.concat(rarities, ", "))
-	end
-end
+			if IsRefreshingSeedDropdown then
+				return
+			end
 
-EggsTab:AddDropdown({
-	Name = "Egg Rarity Selector",
-	Default = getSafeDropdownDefault(EggRarityOptions, State.SelectedEggRarityOption, "Select Rarity"),
-	Options = EggRarityOptions,
-	Callback = function(value)
-		State.SelectedEggRarityOption = value
+			local seedName = SeedOptionMap[value]
 
-		if value == "Select Rarity" then
+			if not seedName then
+				return
+			end
+
+			State.SelectedSeeds[seedName] = true
+			updateSelectedSeedsLabel()
 			saveConfig()
+
+			OrionLib:MakeNotification({
+				Name = "Seed Selected",
+				Content = seedName .. " was added to selected seeds.",
+				Time = 3,
+			})
+		end,
+	})
+
+	SeedsTab:AddSection({
+		Name = "Seed Rarity Filter",
+	})
+
+	SelectedSeedRaritiesLabel = SeedsTab:AddParagraph("Selected Rarities", "None")
+
+	function updateSelectedSeedRaritiesLabel()
+		if not SelectedSeedRaritiesLabel then
 			return
 		end
 
-		State.SelectedEggRarities[value] = true
-		updateSelectedEggRaritiesLabel()
-		saveConfig()
+		local rarities = getSelectedSeedRarityList()
 
-		OrionLib:MakeNotification({
-			Name = "Egg Rarity Selected",
-			Content = value .. " eggs will be bought from the merchant.",
-			Time = 3,
-		})
-	end,
-})
-
-EggsTab:AddButton({
-	Name = "Clear Selected Egg Rarities",
-	Callback = function()
-		table.clear(State.SelectedEggRarities)
-		updateSelectedEggRaritiesLabel()
-		saveConfig()
-
-		OrionLib:MakeNotification({
-			Name = "Cleared",
-			Content = "Selected egg rarities cleared.",
-			Time = 3,
-		})
-	end,
-})
-
-EggsTab:AddButton({
-	Name = "Buy Selected Egg Rarities Once",
-	Callback = function()
-		buyEggsOnce(false)
-	end,
-})
-
-EggsTab:AddToggle({
-	Name = "Auto Buy Selected Egg Rarities",
-	Default = State.AutoBuySelectedEggRarities,
-	Callback = function(value)
-		State.AutoBuySelectedEggRarities = value
-		saveConfig()
-		consolePrint("[TOGGLE] Auto Buy Selected Egg Rarities:", value)
-	end,
-})
-
-EggsTab:AddSection({
-	Name = "All Eggs",
-})
-
-EggsTab:AddButton({
-	Name = "Buy All Eggs Once",
-	Callback = function()
-		buyEggsOnce(true)
-	end,
-})
-
-EggsTab:AddToggle({
-	Name = "Auto Buy All Eggs",
-	Default = State.AutoBuyAllEggs,
-	Callback = function(value)
-		State.AutoBuyAllEggs = value
-		saveConfig()
-		consolePrint("[TOGGLE] Auto Buy All Eggs:", value)
-	end,
-})
-
-EggsTab:AddSlider({
-	Name = "Egg Buy Loop Delay",
-	Min = 1,
-	Max = 120,
-	Default = State.EggDelay,
-	Increment = 1,
-	ValueName = "sec",
-	Callback = function(value)
-		State.EggDelay = value
-		saveConfig()
-	end,
-})
-
---// COMPOST TAB
-
-CompostTab:AddSection({
-	Name = "Auto Compost",
-})
-
-local IsRefreshingCompostSeedDropdown = false
-local CompostSeedLabel
-local updateCompostSeedLabel
-
-CompostSeedLabel = CompostTab:AddParagraph("Selected Seed Variants", "None")
-
-function updateCompostSeedLabel()
-	if not CompostSeedLabel then
-		return
+		if #rarities == 0 then
+			SelectedSeedRaritiesLabel:Set("None")
+		else
+			SelectedSeedRaritiesLabel:Set(table.concat(rarities, ", "))
+		end
 	end
 
-	local seedKeys = getSelectedCompostSeedKeyList()
+	SeedsTab:AddDropdown({
+		Name = "Rarity Selector",
+		Default = getSafeDropdownDefault(SeedRarityOptions, State.SelectedSeedRarityOption, "Select Rarity"),
+		Options = SeedRarityOptions,
+		Callback = function(value)
+			State.SelectedSeedRarityOption = value
 
-	if #seedKeys > 0 then
-		CompostSeedLabel:Set(table.concat(seedKeys, ", "))
-	else
-		CompostSeedLabel:Set("None")
+			if value == "Select Rarity" then
+				saveConfig()
+				return
+			end
+
+			State.SelectedSeedRarities[value] = true
+			updateSelectedSeedRaritiesLabel()
+			saveConfig()
+
+			OrionLib:MakeNotification({
+				Name = "Rarity Selected",
+				Content = value .. " seeds will be bought when rolled.",
+				Time = 3,
+			})
+		end,
+	})
+
+	SeedsTab:AddButton({
+		Name = "Clear Selected Rarities",
+		Callback = function()
+			table.clear(State.SelectedSeedRarities)
+			updateSelectedSeedRaritiesLabel()
+			saveConfig()
+
+			OrionLib:MakeNotification({
+				Name = "Cleared",
+				Content = "Selected seed rarities cleared.",
+				Time = 3,
+			})
+		end,
+	})
+
+	SeedsTab:AddToggle({
+		Name = "Auto Buy Selected Rarities",
+		Default = State.AutoBuySelectedSeedRarities,
+		Callback = function(value)
+			State.AutoBuySelectedSeedRarities = value
+			saveConfig()
+			consolePrint("[TOGGLE] Auto Buy Selected Seed Rarities:", value)
+		end,
+	})
+
+	local function refreshSeedDropdown()
+		local seedNames = getSeedNames()
+		local options = {
+			"Select Seed",
+		}
+		SeedOptionMap = {}
+
+		for _, seedName in ipairs(seedNames) do
+			table.insert(options, seedName)
+			SeedOptionMap[seedName] = seedName
+		end
+
+		if #seedNames == 0 then
+			options = {
+				"No Seeds Found",
+			}
+		end
+
+		IsRefreshingSeedDropdown = true
+		SeedDropdown:Refresh(options, true)
+		pcall(function()
+			if State.SelectedSeedOption and SeedOptionMap[State.SelectedSeedOption] then
+				SeedDropdown:Set(State.SelectedSeedOption)
+			else
+				SeedDropdown:Set("Select Seed")
+			end
+		end)
+		IsRefreshingSeedDropdown = false
 	end
-end
 
-local CompostSeedDropdown = CompostTab:AddDropdown({
-	Name = "Seed Dropdown",
-	Default = "Select Seed",
-	Options = {
-		"Select Seed",
-	},
-	Callback = function(value)
-		State.SelectedCompostSeedOption = value
+	SeedsTab:AddButton({
+		Name = "Clear Selected Seeds",
+		Callback = function()
+			table.clear(State.SelectedSeeds)
+			updateSelectedSeedsLabel()
+			saveConfig()
 
-		if IsRefreshingCompostSeedDropdown then
+			OrionLib:MakeNotification({
+				Name = "Cleared",
+				Content = "Selected seed list cleared.",
+				Time = 3,
+			})
+		end,
+	})
+
+	SeedsTab:AddToggle({
+		Name = "Auto Buy Selected Seeds",
+		Default = State.AutoBuySelectedSeeds,
+		Callback = function(value)
+			State.AutoBuySelectedSeeds = value
+			saveConfig()
+			consolePrint("[TOGGLE] Auto Buy Selected Seeds:", value)
+		end,
+	})
+
+	SeedsTab:AddToggle({
+		Name = "Auto Roll",
+		Default = State.AutoRoll,
+		Callback = function(value)
+			State.AutoRoll = value
+			saveConfig()
+			consolePrint("[TOGGLE] Auto Roll:", value)
+		end,
+	})
+
+	--// EGGS TAB
+
+	EggsTab:AddSection({
+		Name = "Pet Merchant",
+	})
+
+	local SelectedEggRaritiesLabel
+	local updateSelectedEggRaritiesLabel
+
+	SelectedEggRaritiesLabel = EggsTab:AddParagraph("Selected Egg Rarities", "None")
+
+	function updateSelectedEggRaritiesLabel()
+		if not SelectedEggRaritiesLabel then
 			return
 		end
 
+		local rarities = getSelectedEggRarityList()
+
+		if #rarities == 0 then
+			SelectedEggRaritiesLabel:Set("None")
+		else
+			SelectedEggRaritiesLabel:Set(table.concat(rarities, ", "))
+		end
+	end
+
+	EggsTab:AddDropdown({
+		Name = "Egg Rarity Selector",
+		Default = getSafeDropdownDefault(EggRarityOptions, State.SelectedEggRarityOption, "Select Rarity"),
+		Options = EggRarityOptions,
+		Callback = function(value)
+			State.SelectedEggRarityOption = value
+
+			if value == "Select Rarity" then
+				saveConfig()
+				return
+			end
+
+			State.SelectedEggRarities[value] = true
+			updateSelectedEggRaritiesLabel()
+			saveConfig()
+
+			OrionLib:MakeNotification({
+				Name = "Egg Rarity Selected",
+				Content = value .. " eggs will be bought from the merchant.",
+				Time = 3,
+			})
+		end,
+	})
+
+	EggsTab:AddButton({
+		Name = "Clear Selected Egg Rarities",
+		Callback = function()
+			table.clear(State.SelectedEggRarities)
+			updateSelectedEggRaritiesLabel()
+			saveConfig()
+
+			OrionLib:MakeNotification({
+				Name = "Cleared",
+				Content = "Selected egg rarities cleared.",
+				Time = 3,
+			})
+		end,
+	})
+
+	EggsTab:AddButton({
+		Name = "Buy Selected Egg Rarities Once",
+		Callback = function()
+			buyEggsOnce(false)
+		end,
+	})
+
+	EggsTab:AddToggle({
+		Name = "Auto Buy Selected Egg Rarities",
+		Default = State.AutoBuySelectedEggRarities,
+		Callback = function(value)
+			State.AutoBuySelectedEggRarities = value
+			saveConfig()
+			consolePrint("[TOGGLE] Auto Buy Selected Egg Rarities:", value)
+		end,
+	})
+
+	EggsTab:AddSection({
+		Name = "All Eggs",
+	})
+
+	EggsTab:AddButton({
+		Name = "Buy All Eggs Once",
+		Callback = function()
+			buyEggsOnce(true)
+		end,
+	})
+
+	EggsTab:AddToggle({
+		Name = "Auto Buy All Eggs",
+		Default = State.AutoBuyAllEggs,
+		Callback = function(value)
+			State.AutoBuyAllEggs = value
+			saveConfig()
+			consolePrint("[TOGGLE] Auto Buy All Eggs:", value)
+		end,
+	})
+
+	EggsTab:AddSlider({
+		Name = "Egg Buy Loop Delay",
+		Min = 1,
+		Max = 120,
+		Default = State.EggDelay,
+		Increment = 1,
+		ValueName = "sec",
+		Callback = function(value)
+			State.EggDelay = value
+			saveConfig()
+		end,
+	})
+
+	--// COMPOST TAB
+
+	CompostTab:AddSection({
+		Name = "Auto Compost",
+	})
+
+	local IsRefreshingCompostSeedDropdown = false
+	local CompostSeedLabel
+	local updateCompostSeedLabel
+
+	CompostSeedLabel = CompostTab:AddParagraph("Selected Seed Variants", "None")
+
+	function updateCompostSeedLabel()
+		if not CompostSeedLabel then
+			return
+		end
+
+		local seedKeys = getSelectedCompostSeedKeyList()
+
+		if #seedKeys > 0 then
+			CompostSeedLabel:Set(table.concat(seedKeys, ", "))
+		else
+			CompostSeedLabel:Set("None")
+		end
+	end
+
+	local CompostSeedDropdown = CompostTab:AddDropdown({
+		Name = "Seed Dropdown",
+		Default = "Select Seed",
+		Options = {
+			"Select Seed",
+		},
+		Callback = function(value)
+			State.SelectedCompostSeedOption = value
+
+			if IsRefreshingCompostSeedDropdown then
+				return
+			end
+
+			updateCompostSeedLabel()
+
+			local seedName = getSelectedCompostSeedName()
+
+			if seedName then
+				State.SelectedCompostSeeds[seedName] = true
+				updateCompostSeedLabel()
+				saveConfig()
+
+				OrionLib:MakeNotification({
+					Name = "Compost Seed Selected",
+					Content = getCompostSeedKey(seedName) .. " was added to compost seeds.",
+					Time = 3,
+				})
+			else
+				saveConfig()
+			end
+		end,
+	})
+
+	local function refreshCompostSeedDropdown()
+		local seedNames = getSeedNames()
+		local options = {
+			"Select Seed",
+		}
+		CompostSeedOptionMap = {}
+
+		for _, seedName in ipairs(seedNames) do
+			table.insert(options, seedName)
+			CompostSeedOptionMap[seedName] = seedName
+		end
+
+		if #seedNames == 0 then
+			options = {
+				"No Seeds Found",
+			}
+		end
+
+		IsRefreshingCompostSeedDropdown = true
+		CompostSeedDropdown:Refresh(options, true)
+		pcall(function()
+			if State.SelectedCompostSeedOption and CompostSeedOptionMap[State.SelectedCompostSeedOption] then
+				CompostSeedDropdown:Set(State.SelectedCompostSeedOption)
+			else
+				CompostSeedDropdown:Set("Select Seed")
+			end
+		end)
+		IsRefreshingCompostSeedDropdown = false
 		updateCompostSeedLabel()
+	end
 
-		local seedName = getSelectedCompostSeedName()
+	CompostTab:AddButton({
+		Name = "Refresh Seed List",
+		Callback = function()
+			refreshCompostSeedDropdown()
+		end,
+	})
 
-		if seedName then
-			State.SelectedCompostSeeds[seedName] = true
+	CompostTab:AddButton({
+		Name = "Clear Selected Compost Seeds",
+		Callback = function()
+			table.clear(State.SelectedCompostSeeds)
 			updateCompostSeedLabel()
 			saveConfig()
 
 			OrionLib:MakeNotification({
-				Name = "Compost Seed Selected",
-				Content = getCompostSeedKey(seedName) .. " was added to compost seeds.",
+				Name = "Cleared",
+				Content = "Selected compost seeds cleared.",
 				Time = 3,
 			})
-		else
+		end,
+	})
+
+	CompostTab:AddButton({
+		Name = "Compost Selected Seeds Once",
+		Callback = function()
+			compostSelectedSeedsOnce(false)
+		end,
+	})
+
+	CompostTab:AddToggle({
+		Name = "Auto Compost Selected Seeds",
+		Default = State.AutoCompost,
+		Callback = function(value)
+			State.AutoCompost = value
 			saveConfig()
-		end
-	end,
-})
+			consolePrint("[TOGGLE] Auto Compost:", value)
+		end,
+	})
 
-local function refreshCompostSeedDropdown()
-	local seedNames = getSeedNames()
-	local options = {
-		"Select Seed",
-	}
-	CompostSeedOptionMap = {}
+	CompostTab:AddSlider({
+		Name = "Compost Loop Delay",
+		Min = 1,
+		Max = 120,
+		Default = State.CompostDelay,
+		Increment = 1,
+		ValueName = "sec",
+		Callback = function(value)
+			State.CompostDelay = value
+			saveConfig()
+		end,
+	})
 
-	for _, seedName in ipairs(seedNames) do
-		table.insert(options, seedName)
-		CompostSeedOptionMap[seedName] = seedName
-	end
+	--// PLOT TAB
 
-	if #seedNames == 0 then
-		options = {
-			"No Seeds Found",
-		}
-	end
+	PlotTab:AddSection({
+		Name = "Floor Filter",
+	})
 
-	IsRefreshingCompostSeedDropdown = true
-	CompostSeedDropdown:Refresh(options, true)
-	pcall(function()
-		if State.SelectedCompostSeedOption and CompostSeedOptionMap[State.SelectedCompostSeedOption] then
-			CompostSeedDropdown:Set(State.SelectedCompostSeedOption)
-		else
-			CompostSeedDropdown:Set("Select Seed")
-		end
-	end)
-	IsRefreshingCompostSeedDropdown = false
-	updateCompostSeedLabel()
-end
+	local IsInitializingPlotFloorDropdown = true
+	local SelectedPlotFloorsLabel =
+		PlotTab:AddParagraph("Selected Floors", table.concat(getSelectedPlotFloorList(), ", "))
 
-CompostTab:AddButton({
-	Name = "Refresh Seed List",
-	Callback = function()
-		refreshCompostSeedDropdown()
-	end,
-})
-
-CompostTab:AddButton({
-	Name = "Clear Selected Compost Seeds",
-	Callback = function()
-		table.clear(State.SelectedCompostSeeds)
-		updateCompostSeedLabel()
-		saveConfig()
-
-		OrionLib:MakeNotification({
-			Name = "Cleared",
-			Content = "Selected compost seeds cleared.",
-			Time = 3,
-		})
-	end,
-})
-
-CompostTab:AddButton({
-	Name = "Compost Selected Seeds Once",
-	Callback = function()
-		compostSelectedSeedsOnce(false)
-	end,
-})
-
-CompostTab:AddToggle({
-	Name = "Auto Compost Selected Seeds",
-	Default = State.AutoCompost,
-	Callback = function(value)
-		State.AutoCompost = value
-		saveConfig()
-		consolePrint("[TOGGLE] Auto Compost:", value)
-	end,
-})
-
-CompostTab:AddSlider({
-	Name = "Compost Loop Delay",
-	Min = 1,
-	Max = 120,
-	Default = State.CompostDelay,
-	Increment = 1,
-	ValueName = "sec",
-	Callback = function(value)
-		State.CompostDelay = value
-		saveConfig()
-	end,
-})
-
---// PLOT TAB
-
-PlotTab:AddSection({
-	Name = "Floor Filter",
-})
-
-PlotTab:AddDropdown({
-	Name = "Floor Selector",
-	Default = getSafeDropdownDefault(PlotFloorOptions, State.SelectedPlotFloorOption, "All Floors"),
-	Options = {
-		"All Floors",
-		"Floor 1",
-		"Floor 2",
-		"Floor 3",
-	},
-	Callback = function(value)
-		if not isValidPlotFloorOption(value) then
+	function updateSelectedPlotFloorsLabel()
+		if not SelectedPlotFloorsLabel then
 			return
 		end
 
-		State.SelectedPlotFloorOption = value
+		SelectedPlotFloorsLabel:Set(table.concat(getSelectedPlotFloorList(), ", "))
+	end
 
-		if value == "All Floors" then
-			State.SelectedPlotFloors = {
-				["All Floors"] = true,
-			}
-		else
-			if State.SelectedPlotFloors["All Floors"] then
-				State.SelectedPlotFloors = {}
+	PlotTab:AddDropdown({
+		Name = "Floor Selector",
+		Default = getSafeDropdownDefault(PlotFloorOptions, State.SelectedPlotFloorOption, "All Floors"),
+		Options = PlotFloorOptions,
+		Callback = function(value)
+			if IsInitializingPlotFloorDropdown then
+				return
 			end
 
-			State.SelectedPlotFloors[value] = not State.SelectedPlotFloors[value]
+			selectPlotFloorOption(value)
+		end,
+	})
 
-			if next(State.SelectedPlotFloors) == nil then
-				State.SelectedPlotFloorOption = "All Floors"
-				State.SelectedPlotFloors = {
-					["All Floors"] = true,
-				}
-			end
+	IsInitializingPlotFloorDropdown = false
+
+	PlotTab:AddSection({
+		Name = "Plant Viewer",
+	})
+
+	PlantViewerLabel = PlotTab:AddParagraph("Placed Plants", "Loading...")
+
+	function updatePlantViewerLabel(forceRefresh)
+		if not PlantViewerLabel then
+			return
 		end
 
-		invalidateFarmDirtCache()
+		PlantViewerLabel:Set(formatPlacedPlantSummary(forceRefresh == true))
+	end
 
-		if updateSelectedPlotFloorsLabel then
-			updateSelectedPlotFloorsLabel()
-		end
-
-		if updatePlantViewerLabel then
+	PlotTab:AddButton({
+		Name = "Refresh Plant Viewer",
+		Callback = function()
 			updatePlantViewerLabel(true)
-		end
+		end,
+	})
 
-		saveConfig()
-	end,
-})
+	PlotTab:AddSection({
+		Name = "Plant Upgrades",
+	})
 
-SelectedPlotFloorsLabel = PlotTab:AddParagraph("Selected Floors", "All Floors")
+	PlotTab:AddSlider({
+		Name = "Target Plant Level",
+		Min = 1,
+		Max = 100,
+		Default = State.PlantUpgradeTargetLevel,
+		Increment = 1,
+		ValueName = "level",
+		Callback = function(value)
+			State.PlantUpgradeTargetLevel = value
+			saveConfig()
+		end,
+	})
 
-function updateSelectedPlotFloorsLabel()
-	if not SelectedPlotFloorsLabel then
-		return
-	end
+	PlotTab:AddButton({
+		Name = "Upgrade Plants Once",
+		Callback = function()
+			spawnOneShot(function()
+				upgradePlantsOnce(false)
+			end)
+		end,
+	})
 
-	SelectedPlotFloorsLabel:Set(table.concat(getSelectedPlotFloorList(), ", "))
-end
+	PlotTab:AddToggle({
+		Name = "Auto Upgrade Plants",
+		Default = State.AutoUpgradePlants,
+		Callback = function(value)
+			State.AutoUpgradePlants = value
+			saveConfig()
+			consolePrint("[TOGGLE] Auto Upgrade Plants:", value)
+		end,
+	})
 
-PlotTab:AddSection({
-	Name = "Plant Viewer",
-})
+	PlotTab:AddSlider({
+		Name = "Upgrade Pass Delay",
+		Min = 1,
+		Max = 120,
+		Default = State.PlantUpgradeDelay,
+		Increment = 0.5,
+		ValueName = "sec",
+		Callback = function(value)
+			State.PlantUpgradeDelay = value
+			saveConfig()
+		end,
+	})
 
-PlantViewerLabel = PlotTab:AddParagraph("Placed Plants", "Loading...")
+	PlotTab:AddSection({
+		Name = "Seed Planting",
+	})
 
-function updatePlantViewerLabel(forceRefresh)
-	if not PlantViewerLabel then
-		return
-	end
+	local IsRefreshingPlantSeedDropdown = false
+	local PlantSeedDropdown
+	local SelectedPlantSeedLabel
+	local updateSelectedPlantSeedLabel
 
-	PlantViewerLabel:Set(formatPlacedPlantSummary(forceRefresh == true))
-end
+	SelectedPlantSeedLabel = PlotTab:AddParagraph("Selected Seed", State.SelectedPlantSeedOption or "None")
 
-PlotTab:AddButton({
-	Name = "Refresh Plant Viewer",
-	Callback = function()
-		updatePlantViewerLabel(true)
-	end,
-})
-
-PlotTab:AddSection({
-	Name = "Plant Upgrades",
-})
-
-PlotTab:AddSlider({
-	Name = "Target Plant Level",
-	Min = 1,
-	Max = 100,
-	Default = State.PlantUpgradeTargetLevel,
-	Increment = 1,
-	ValueName = "level",
-	Callback = function(value)
-		State.PlantUpgradeTargetLevel = value
-		saveConfig()
-	end,
-})
-
-PlotTab:AddButton({
-	Name = "Upgrade Plants Once",
-	Callback = function()
-		spawnOneShot(function()
-			upgradePlantsOnce(false)
-		end)
-	end,
-})
-
-PlotTab:AddToggle({
-	Name = "Auto Upgrade Plants",
-	Default = State.AutoUpgradePlants,
-	Callback = function(value)
-		State.AutoUpgradePlants = value
-		saveConfig()
-		consolePrint("[TOGGLE] Auto Upgrade Plants:", value)
-	end,
-})
-
-PlotTab:AddSlider({
-	Name = "Upgrade Pass Delay",
-	Min = 2.5,
-	Max = 120,
-	Default = State.PlantUpgradeDelay,
-	Increment = 0.5,
-	ValueName = "sec",
-	Callback = function(value)
-		State.PlantUpgradeDelay = value
-		saveConfig()
-	end,
-})
-
-PlotTab:AddSection({
-	Name = "Seed Planting",
-})
-
-local IsRefreshingPlantSeedDropdown = false
-local PlantSeedDropdown
-local SelectedPlantSeedLabel
-local updateSelectedPlantSeedLabel
-
-SelectedPlantSeedLabel = PlotTab:AddParagraph("Selected Seed", State.SelectedPlantSeedOption or "None")
-
-function updateSelectedPlantSeedLabel()
-	if not SelectedPlantSeedLabel then
-		return
-	end
-
-	local seedName = getSelectedPlantSeedName()
-	local tool = getSelectedSeedTool()
-
-	if seedName and tool then
-		SelectedPlantSeedLabel:Set(seedName .. " | " .. tool.Name)
-	elseif seedName then
-		SelectedPlantSeedLabel:Set(seedName)
-	else
-		SelectedPlantSeedLabel:Set("None")
-	end
-end
-
-PlantSeedDropdown = PlotTab:AddDropdown({
-	Name = "Seed Dropdown",
-	Default = "Select Seed",
-	Options = {
-		"Select Seed",
-	},
-	Callback = function(value)
-		if IsRefreshingPlantSeedDropdown then
+	function updateSelectedPlantSeedLabel()
+		if not SelectedPlantSeedLabel then
 			return
 		end
-
-		State.SelectedPlantSeedOption = value
-		updateSelectedPlantSeedLabel()
-		saveConfig()
 
 		local seedName = getSelectedPlantSeedName()
+		local tool = getSelectedSeedTool()
 
-		if seedName then
-			OrionLib:MakeNotification({
-				Name = "Plant Seed Selected",
-				Content = seedName .. " will be planted in empty dirt spots.",
-				Time = 3,
-			})
-		end
-	end,
-})
-
-local function refreshPlantSeedDropdown()
-	local seedTools = getSeedTools()
-	local options = {
-		"Select Seed",
-	}
-	PlantSeedOptionMap = {}
-
-	for _, tool in ipairs(seedTools) do
-		local seedName = getSeedNameFromTool(tool)
-
-		if seedName then
-			table.insert(options, tool.Name)
-			PlantSeedOptionMap[tool.Name] = seedName
-		end
-	end
-
-	if #seedTools == 0 then
-		options = {
-			"No Seeds Found",
-		}
-	end
-
-	IsRefreshingPlantSeedDropdown = true
-	PlantSeedDropdown:Refresh(options, true)
-	pcall(function()
-		if State.SelectedPlantSeedOption and PlantSeedOptionMap[State.SelectedPlantSeedOption] then
-			PlantSeedDropdown:Set(State.SelectedPlantSeedOption)
-		elseif #seedTools == 0 then
-			PlantSeedDropdown:Set("No Seeds Found")
+		if seedName and tool then
+			SelectedPlantSeedLabel:Set(seedName .. " | " .. tool.Name)
+		elseif seedName then
+			SelectedPlantSeedLabel:Set(seedName)
 		else
-			PlantSeedDropdown:Set("Select Seed")
+			SelectedPlantSeedLabel:Set("None")
 		end
-	end)
-	IsRefreshingPlantSeedDropdown = false
-	updateSelectedPlantSeedLabel()
-end
+	end
 
-PlotTab:AddButton({
-	Name = "Refresh Seed List",
-	Callback = function()
-		refreshPlantSeedDropdown()
-	end,
-})
+	PlantSeedDropdown = PlotTab:AddDropdown({
+		Name = "Seed Dropdown",
+		Default = "Select Seed",
+		Options = {
+			"Select Seed",
+		},
+		Callback = function(value)
+			if IsRefreshingPlantSeedDropdown then
+				return
+			end
 
-PlotTab:AddButton({
-	Name = "Plant Empty Spots Once",
-	Callback = function()
-		spawnOneShot(function()
-			plantSeedsOnce(false)
+			State.SelectedPlantSeedOption = value
+			updateSelectedPlantSeedLabel()
+			saveConfig()
+
+			local seedName = getSelectedPlantSeedName()
+
+			if seedName then
+				OrionLib:MakeNotification({
+					Name = "Plant Seed Selected",
+					Content = seedName .. " will be planted in empty dirt spots.",
+					Time = 3,
+				})
+			end
+		end,
+	})
+
+	local function refreshPlantSeedDropdown()
+		local seedTools = getSeedTools()
+		local options = {
+			"Select Seed",
+		}
+		PlantSeedOptionMap = {}
+
+		for _, tool in ipairs(seedTools) do
+			local seedName = getSeedNameFromTool(tool)
+
+			if seedName then
+				table.insert(options, tool.Name)
+				PlantSeedOptionMap[tool.Name] = seedName
+			end
+		end
+
+		if #seedTools == 0 then
+			options = {
+				"No Seeds Found",
+			}
+		end
+
+		IsRefreshingPlantSeedDropdown = true
+		PlantSeedDropdown:Refresh(options, true)
+		pcall(function()
+			if State.SelectedPlantSeedOption and PlantSeedOptionMap[State.SelectedPlantSeedOption] then
+				PlantSeedDropdown:Set(State.SelectedPlantSeedOption)
+			elseif #seedTools == 0 then
+				PlantSeedDropdown:Set("No Seeds Found")
+			else
+				PlantSeedDropdown:Set("Select Seed")
+			end
 		end)
-	end,
-})
-
-PlotTab:AddToggle({
-	Name = "Auto Plant Seeds",
-	Default = State.AutoPlantSeeds,
-	Callback = function(value)
-		State.AutoPlantSeeds = value
-		saveConfig()
-		consolePrint("[TOGGLE] Auto Plant Seeds:", value)
-	end,
-})
-
-PlotTab:AddSlider({
-	Name = "Plant Pass Delay",
-	Min = 1,
-	Max = 120,
-	Default = State.PlantSeedDelay,
-	Increment = 1,
-	ValueName = "sec",
-	Callback = function(value)
-		State.PlantSeedDelay = value
-		saveConfig()
-	end,
-})
-
-PlotTab:AddSection({
-	Name = "Plant Sprays",
-})
-
-local IsRefreshingSprayDropdown = false
-local SprayDropdown
-local SelectedSprayLabel
-local updateSelectedSprayLabel
-
-SelectedSprayLabel = PlotTab:AddParagraph("Selected Spray", State.SelectedSprayOption or "None")
-
-function updateSelectedSprayLabel()
-	if not SelectedSprayLabel then
-		return
+		IsRefreshingPlantSeedDropdown = false
+		updateSelectedPlantSeedLabel()
 	end
 
-	local tool = getSelectedSprayTool()
+	PlotTab:AddButton({
+		Name = "Refresh Seed List",
+		Callback = function()
+			refreshPlantSeedDropdown()
+		end,
+	})
 
-	if tool then
-		SelectedSprayLabel:Set(tool.Name)
-	elseif State.SelectedSprayOption and State.SelectedSprayOption ~= "Select Spray" then
-		SelectedSprayLabel:Set(State.SelectedSprayOption)
-	else
-		SelectedSprayLabel:Set("None")
-	end
-end
+	PlotTab:AddButton({
+		Name = "Plant Empty Spots Once",
+		Callback = function()
+			spawnOneShot(function()
+				plantSeedsOnce(false)
+			end)
+		end,
+	})
 
-SprayDropdown = PlotTab:AddDropdown({
-	Name = "Spray Dropdown",
-	Default = "Select Spray",
-	Options = {
-		"Select Spray",
-	},
-	Callback = function(value)
-		if IsRefreshingSprayDropdown then
+	PlotTab:AddToggle({
+		Name = "Auto Plant Seeds",
+		Default = State.AutoPlantSeeds,
+		Callback = function(value)
+			State.AutoPlantSeeds = value
+			saveConfig()
+			consolePrint("[TOGGLE] Auto Plant Seeds:", value)
+		end,
+	})
+
+	PlotTab:AddSlider({
+		Name = "Plant Pass Delay",
+		Min = 1,
+		Max = 120,
+		Default = State.PlantSeedDelay,
+		Increment = 1,
+		ValueName = "sec",
+		Callback = function(value)
+			State.PlantSeedDelay = value
+			saveConfig()
+		end,
+	})
+
+	PlotTab:AddSection({
+		Name = "Plant Sprays",
+	})
+
+	local IsRefreshingSprayDropdown = false
+	local SprayDropdown
+	local SelectedSprayLabel
+	local updateSelectedSprayLabel
+
+	SelectedSprayLabel = PlotTab:AddParagraph("Selected Spray", State.SelectedSprayOption or "None")
+
+	function updateSelectedSprayLabel()
+		if not SelectedSprayLabel then
 			return
 		end
 
-		State.SelectedSprayOption = value
+		local tool = getSelectedSprayTool()
 
-		if value ~= "Select Spray" and value ~= "No Sprays Found" then
-			State.SelectedSprayBaseName = getSprayBaseName(value)
+		if tool then
+			SelectedSprayLabel:Set(tool.Name)
+		elseif State.SelectedSprayOption and State.SelectedSprayOption ~= "Select Spray" then
+			SelectedSprayLabel:Set(State.SelectedSprayOption)
 		else
-			State.SelectedSprayBaseName = nil
+			SelectedSprayLabel:Set("None")
 		end
-
-		updateSelectedSprayLabel()
-		saveConfig()
-
-		if value ~= "Select Spray" and value ~= "No Sprays Found" then
-			OrionLib:MakeNotification({
-				Name = "Spray Selected",
-				Content = value .. " will be used for plant sprays.",
-				Time = 3,
-			})
-		end
-	end,
-})
-
-local function refreshSprayDropdown()
-	local tools = getSprayTools()
-	local options = {
-		"Select Spray",
-	}
-	SprayOptionMap = {}
-
-	for _, tool in ipairs(tools) do
-		table.insert(options, tool.Name)
-		SprayOptionMap[tool.Name] = tool
 	end
 
-	if #tools == 0 then
-		options = {
-			"No Sprays Found",
+	SprayDropdown = PlotTab:AddDropdown({
+		Name = "Spray Dropdown",
+		Default = "Select Spray",
+		Options = {
+			"Select Spray",
+		},
+		Callback = function(value)
+			if IsRefreshingSprayDropdown then
+				return
+			end
+
+			State.SelectedSprayOption = value
+
+			if value ~= "Select Spray" and value ~= "No Sprays Found" then
+				State.SelectedSprayBaseName = getSprayBaseName(value)
+			else
+				State.SelectedSprayBaseName = nil
+			end
+
+			updateSelectedSprayLabel()
+			saveConfig()
+
+			if value ~= "Select Spray" and value ~= "No Sprays Found" then
+				OrionLib:MakeNotification({
+					Name = "Spray Selected",
+					Content = value .. " will be used for plant sprays.",
+					Time = 3,
+				})
+			end
+		end,
+	})
+
+	local function refreshSprayDropdown()
+		local tools = getSprayTools()
+		local options = {
+			"Select Spray",
 		}
-	end
+		SprayOptionMap = {}
 
-	IsRefreshingSprayDropdown = true
-	SprayDropdown:Refresh(options, true)
-	pcall(function()
-		local selected = State.SelectedSprayOption
-		local didSet = false
+		for _, tool in ipairs(tools) do
+			table.insert(options, tool.Name)
+			SprayOptionMap[tool.Name] = tool
+		end
 
-		if selected and SprayOptionMap[selected] then
-			SprayDropdown:Set(selected)
-			didSet = true
-		elseif State.SelectedSprayBaseName then
-			for _, option in ipairs(options) do
-				if getSprayBaseName(option) == State.SelectedSprayBaseName then
-					State.SelectedSprayOption = option
-					SprayDropdown:Set(option)
-					didSet = true
-					break
+		if #tools == 0 then
+			options = {
+				"No Sprays Found",
+			}
+		end
+
+		IsRefreshingSprayDropdown = true
+		SprayDropdown:Refresh(options, true)
+		pcall(function()
+			local selected = State.SelectedSprayOption
+			local didSet = false
+
+			if selected and SprayOptionMap[selected] then
+				SprayDropdown:Set(selected)
+				didSet = true
+			elseif State.SelectedSprayBaseName then
+				for _, option in ipairs(options) do
+					if getSprayBaseName(option) == State.SelectedSprayBaseName then
+						State.SelectedSprayOption = option
+						SprayDropdown:Set(option)
+						didSet = true
+						break
+					end
 				end
 			end
+
+			if not didSet then
+				if #tools == 0 then
+					SprayDropdown:Set("No Sprays Found")
+				else
+					SprayDropdown:Set("Select Spray")
+				end
+			end
+		end)
+		IsRefreshingSprayDropdown = false
+		updateSelectedSprayLabel()
+	end
+
+	PlotTab:AddButton({
+		Name = "Refresh Sprays",
+		Callback = function()
+			refreshSprayDropdown()
+		end,
+	})
+
+	PlotTab:AddButton({
+		Name = "Spray Plants Once",
+		Callback = function()
+			spawnOneShot(function()
+				sprayPlantsOnce(false)
+			end)
+		end,
+	})
+
+	PlotTab:AddToggle({
+		Name = "Auto Spray Plants",
+		Default = State.AutoSprayPlants,
+		Callback = function(value)
+			State.AutoSprayPlants = value
+			saveConfig()
+			consolePrint("[TOGGLE] Auto Spray Plants:", value)
+		end,
+	})
+
+	PlotTab:AddSlider({
+		Name = "Spray Pass Delay",
+		Min = 1,
+		Max = 120,
+		Default = State.SprayDelay,
+		Increment = 1,
+		ValueName = "sec",
+		Callback = function(value)
+			State.SprayDelay = value
+			saveConfig()
+		end,
+	})
+
+	PlotTab:AddSection({
+		Name = "Plant Removal",
+	})
+
+	PlotTab:AddButton({
+		Name = "Remove All Plants",
+		Callback = function()
+			spawnOneShot(function()
+				removeAllPlants()
+			end)
+		end,
+	})
+
+	--// AUTO BUY TAB
+
+	AutoBuyTab:AddSection({
+		Name = "Gear Shop",
+	})
+
+	AutoBuyTab:AddButton({
+		Name = "Buy Everything Once",
+		Callback = function()
+			buyAllGearOnce()
+		end,
+	})
+
+	AutoBuyTab:AddToggle({
+		Name = "Auto Buy Everything",
+		Default = State.AutoBuyAllGear,
+		Callback = function(value)
+			State.AutoBuyAllGear = value
+			saveConfig()
+			consolePrint("[TOGGLE] Auto Buy Everything:", value)
+		end,
+	})
+
+	AutoBuyTab:AddSlider({
+		Name = "Gear Buy Loop Delay",
+		Min = 1,
+		Max = 120,
+		Default = State.GearDelay,
+		Increment = 1,
+		ValueName = "sec",
+		Callback = function(value)
+			State.GearDelay = value
+			saveConfig()
+		end,
+	})
+
+	AutoBuyTab:AddSection({
+		Name = "Auto Sell",
+	})
+
+	AutoBuyTab:AddToggle({
+		Name = "Auto Sell",
+		Default = State.AutoSell,
+		Callback = function(value)
+			State.AutoSell = value
+			saveConfig()
+			consolePrint("[TOGGLE] Auto Sell:", value)
+		end,
+	})
+
+	AutoBuyTab:AddSlider({
+		Name = "Sell Loop Delay",
+		Min = 1,
+		Max = 120,
+		Default = State.SellDelay,
+		Increment = 1,
+		ValueName = "sec",
+		Callback = function(value)
+			State.SellDelay = value
+			saveConfig()
+		end,
+	})
+
+	--// STATS TAB
+
+	StatsTab:AddSection({
+		Name = "Session Stats",
+	})
+
+	StatsSummaryLabel = StatsTab:AddParagraph("Summary", "Loading...")
+	StatsSeedsLabel = StatsTab:AddParagraph("Seeds Bought", "Loading...")
+	StatsEggsLabel = StatsTab:AddParagraph("Eggs Bought", "Loading...")
+
+	function updateStatsLabels()
+		if not StatsSummaryLabel or not StatsSeedsLabel or not StatsEggsLabel then
+			return
 		end
 
-		if not didSet then
-			if #tools == 0 then
-				SprayDropdown:Set("No Sprays Found")
+		StatsSummaryLabel:Set(
+			"Seeds: "
+				.. tostring(SessionStats.SeedsBoughtTotal)
+				.. " | Eggs: "
+				.. tostring(SessionStats.EggsBoughtTotal)
+		)
+		StatsSeedsLabel:Set(formatCountMap(SessionStats.SeedsBoughtByName))
+		StatsEggsLabel:Set(formatCountMap(SessionStats.EggsBoughtByName))
+	end
+
+	StatsTab:AddButton({
+		Name = "Reset Session Stats",
+		Callback = function()
+			resetSessionStats()
+
+			OrionLib:MakeNotification({
+				Name = "Stats Reset",
+				Content = "Session auto-buy stats have been reset.",
+				Time = 3,
+			})
+		end,
+	})
+
+	--// SETTINGS TAB
+
+	SettingsTab:AddSection({
+		Name = "Player",
+	})
+
+	SettingsTab:AddToggle({
+		Name = "Anti AFK",
+		Default = State.AntiAFK,
+		Callback = function(value)
+			State.AntiAFK = value
+			saveConfig()
+			consolePrint("[TOGGLE] Anti AFK:", value)
+		end,
+	})
+
+	SettingsTab:AddSection({
+		Name = "Discord Webhook",
+	})
+
+	SettingsTab:AddTextbox({
+		Name = "Webhook URL",
+		Default = State.WebhookURL,
+		TextDisappear = false,
+		Callback = function(value)
+			State.WebhookURL = trim(value)
+			saveConfig()
+			consolePrint("[WEBHOOK] URL updated.")
+		end,
+	})
+
+	SettingsTab:AddToggle({
+		Name = "Webhook Seed Purchases",
+		Default = State.WebhookSeedPurchases,
+		Callback = function(value)
+			State.WebhookSeedPurchases = value
+			saveConfig()
+		end,
+	})
+
+	SettingsTab:AddToggle({
+		Name = "Webhook Expensive Gear",
+		Default = State.WebhookExpensiveGear,
+		Callback = function(value)
+			State.WebhookExpensiveGear = value
+			saveConfig()
+		end,
+	})
+
+	local ThresholdOptions = {
+		"500K",
+		"1M",
+		"10M",
+		"50M",
+		"75M",
+		"750M",
+		"1B",
+		"10B",
+		"15B",
+		"20B",
+		"100B",
+		"1T",
+		"25T",
+	}
+
+	SettingsTab:AddDropdown({
+		Name = "Expensive Threshold",
+		Default = getSafeDropdownDefault(ThresholdOptions, State.ExpensiveThresholdOption, "10B"),
+		Options = ThresholdOptions,
+		Callback = function(value)
+			State.ExpensiveThresholdOption = value
+			State.ExpensiveThreshold = parsePrice(value)
+			saveConfig()
+
+			OrionLib:MakeNotification({
+				Name = "Threshold Updated",
+				Content = "Expensive webhook threshold is now " .. value .. ".",
+				Time = 3,
+			})
+		end,
+	})
+
+	SettingsTab:AddButton({
+		Name = "Test Webhook",
+		Callback = function()
+			sendWebhook("âœ… Webhook Test", "Your Fortune Auto Tool webhook is working.", {
+				{
+					name = "Player",
+					value = LocalPlayer.Name,
+					inline = true,
+				},
+				{
+					name = "Threshold",
+					value = formatPrice(State.ExpensiveThreshold),
+					inline = true,
+				},
+			}, 3447003)
+		end,
+	})
+
+	SettingsTab:AddButton({
+		Name = "Destroy UI",
+		Callback = function()
+			cleanupCurrentScript()
+		end,
+	})
+
+	--// LOOPS
+
+	spawnManaged(function()
+		while not ENV.Stop do
+			if State.AutoRoll then
+				if State.AutoBuySelectedSeeds or State.AutoBuySelectedSeedRarities then
+					local boughtCount = buySelectedSeedsFromCurrentRoll()
+
+					if boughtCount > 0 then
+						task.wait(0.05)
+					end
+				end
+
+				rollSeeds()
+
+				task.wait(math.max(0.5, State.RollDelay))
 			else
-				SprayDropdown:Set("Select Spray")
+				task.wait(0.25)
 			end
 		end
 	end)
-	IsRefreshingSprayDropdown = false
-	updateSelectedSprayLabel()
-end
 
-PlotTab:AddButton({
-	Name = "Refresh Sprays",
-	Callback = function()
-		refreshSprayDropdown()
-	end,
-})
-
-PlotTab:AddButton({
-	Name = "Spray Plants Once",
-	Callback = function()
-		spawnOneShot(function()
-			sprayPlantsOnce(false)
-		end)
-	end,
-})
-
-PlotTab:AddToggle({
-	Name = "Auto Spray Plants",
-	Default = State.AutoSprayPlants,
-	Callback = function(value)
-		State.AutoSprayPlants = value
-		saveConfig()
-		consolePrint("[TOGGLE] Auto Spray Plants:", value)
-	end,
-})
-
-PlotTab:AddSlider({
-	Name = "Spray Pass Delay",
-	Min = 1,
-	Max = 120,
-	Default = State.SprayDelay,
-	Increment = 1,
-	ValueName = "sec",
-	Callback = function(value)
-		State.SprayDelay = value
-		saveConfig()
-	end,
-})
-
-PlotTab:AddSection({
-	Name = "Plant Removal",
-})
-
-PlotTab:AddButton({
-	Name = "Remove All Plants",
-	Callback = function()
-		spawnOneShot(function()
-			removeAllPlants()
-		end)
-	end,
-})
-
---// AUTO BUY TAB
-
-AutoBuyTab:AddSection({
-	Name = "Gear Shop",
-})
-
-AutoBuyTab:AddButton({
-	Name = "Buy Everything Once",
-	Callback = function()
-		buyAllGearOnce()
-	end,
-})
-
-AutoBuyTab:AddToggle({
-	Name = "Auto Buy Everything",
-	Default = State.AutoBuyAllGear,
-	Callback = function(value)
-		State.AutoBuyAllGear = value
-		saveConfig()
-		consolePrint("[TOGGLE] Auto Buy Everything:", value)
-	end,
-})
-
-AutoBuyTab:AddSlider({
-	Name = "Gear Buy Loop Delay",
-	Min = 1,
-	Max = 120,
-	Default = State.GearDelay,
-	Increment = 1,
-	ValueName = "sec",
-	Callback = function(value)
-		State.GearDelay = value
-		saveConfig()
-	end,
-})
-
-AutoBuyTab:AddSection({
-	Name = "Auto Sell",
-})
-
-AutoBuyTab:AddToggle({
-	Name = "Auto Sell",
-	Default = State.AutoSell,
-	Callback = function(value)
-		State.AutoSell = value
-		saveConfig()
-		consolePrint("[TOGGLE] Auto Sell:", value)
-	end,
-})
-
-AutoBuyTab:AddSlider({
-	Name = "Sell Loop Delay",
-	Min = 1,
-	Max = 120,
-	Default = State.SellDelay,
-	Increment = 1,
-	ValueName = "sec",
-	Callback = function(value)
-		State.SellDelay = value
-		saveConfig()
-	end,
-})
-
---// STATS TAB
-
-StatsTab:AddSection({
-	Name = "Session Stats",
-})
-
-StatsSummaryLabel = StatsTab:AddParagraph("Summary", "Loading...")
-StatsSeedsLabel = StatsTab:AddParagraph("Seeds Bought", "Loading...")
-StatsEggsLabel = StatsTab:AddParagraph("Eggs Bought", "Loading...")
-
-function updateStatsLabels()
-	if not StatsSummaryLabel or not StatsSeedsLabel or not StatsEggsLabel then
-		return
-	end
-
-	StatsSummaryLabel:Set(
-		"Seeds: " .. tostring(SessionStats.SeedsBoughtTotal) .. " | Eggs: " .. tostring(SessionStats.EggsBoughtTotal)
-	)
-	StatsSeedsLabel:Set(formatCountMap(SessionStats.SeedsBoughtByName))
-	StatsEggsLabel:Set(formatCountMap(SessionStats.EggsBoughtByName))
-end
-
-StatsTab:AddButton({
-	Name = "Reset Session Stats",
-	Callback = function()
-		resetSessionStats()
-
-		OrionLib:MakeNotification({
-			Name = "Stats Reset",
-			Content = "Session auto-buy stats have been reset.",
-			Time = 3,
-		})
-	end,
-})
-
---// SETTINGS TAB
-
-SettingsTab:AddSection({
-	Name = "Config",
-})
-
-SettingsTab:AddToggle({
-	Name = "Save Config",
-	Default = State.SaveConfigEnabled,
-	Callback = function(value)
-		State.SaveConfigEnabled = value
-		saveConfig(true)
-
-		if value and not canUseFileConfig() then
-			OrionLib:MakeNotification({
-				Name = "Config Unavailable",
-				Content = "This executor does not expose readfile/writefile config support.",
-				Time = 4,
-			})
-		end
-	end,
-})
-
-SettingsTab:AddSection({
-	Name = "Player",
-})
-
-SettingsTab:AddToggle({
-	Name = "Anti AFK",
-	Default = State.AntiAFK,
-	Callback = function(value)
-		State.AntiAFK = value
-		saveConfig()
-		consolePrint("[TOGGLE] Anti AFK:", value)
-	end,
-})
-
-SettingsTab:AddSection({
-	Name = "Discord Webhook",
-})
-
-SettingsTab:AddTextbox({
-	Name = "Webhook URL",
-	Default = State.WebhookURL,
-	TextDisappear = false,
-	Callback = function(value)
-		State.WebhookURL = trim(value)
-		saveConfig()
-		consolePrint("[WEBHOOK] URL updated.")
-	end,
-})
-
-SettingsTab:AddToggle({
-	Name = "Webhook Seed Purchases",
-	Default = State.WebhookSeedPurchases,
-	Callback = function(value)
-		State.WebhookSeedPurchases = value
-		saveConfig()
-	end,
-})
-
-SettingsTab:AddToggle({
-	Name = "Webhook Expensive Gear",
-	Default = State.WebhookExpensiveGear,
-	Callback = function(value)
-		State.WebhookExpensiveGear = value
-		saveConfig()
-	end,
-})
-
-local ThresholdOptions = {
-	"500K",
-	"1M",
-	"10M",
-	"50M",
-	"75M",
-	"750M",
-	"1B",
-	"10B",
-	"15B",
-	"20B",
-	"100B",
-	"1T",
-	"25T",
-}
-
-SettingsTab:AddDropdown({
-	Name = "Expensive Threshold",
-	Default = getSafeDropdownDefault(ThresholdOptions, State.ExpensiveThresholdOption, "10B"),
-	Options = ThresholdOptions,
-	Callback = function(value)
-		State.ExpensiveThresholdOption = value
-		State.ExpensiveThreshold = parsePrice(value)
-		saveConfig()
-
-		OrionLib:MakeNotification({
-			Name = "Threshold Updated",
-			Content = "Expensive webhook threshold is now " .. value .. ".",
-			Time = 3,
-		})
-	end,
-})
-
-SettingsTab:AddButton({
-	Name = "Test Webhook",
-	Callback = function()
-		sendWebhook("âœ… Webhook Test", "Your Fortune Auto Tool webhook is working.", {
-			{
-				name = "Player",
-				value = LocalPlayer.Name,
-				inline = true,
-			},
-			{
-				name = "Threshold",
-				value = formatPrice(State.ExpensiveThreshold),
-				inline = true,
-			},
-		}, 3447003)
-	end,
-})
-
-SettingsTab:AddSection({
-	Name = "Debug",
-})
-
-SettingsTab:AddButton({
-	Name = "Print Current Plot Seeds",
-	Callback = function()
-		local seeds = scanCurrentPlotSeeds()
-
-		consolePrint("========== CURRENT PLOT SEEDS ==========")
-
-		for _, seed in ipairs(seeds) do
-			consolePrint(
-				"Slot "
-					.. seed.Slot
-					.. " = "
-					.. seed.Name
-					.. " | "
-					.. seed.Rarity
-					.. " | "
-					.. seed.CostText
-					.. " | "
-					.. formatPrice(seed.Price)
-			)
-		end
-
-		consolePrint("========================================")
-	end,
-})
-
-SettingsTab:AddButton({
-	Name = "Print Current Merchant Eggs",
-	Callback = function()
-		local eggs = scanEggShop()
-
-		consolePrint("========== CURRENT MERCHANT EGGS ==========")
-
-		for _, egg in ipairs(eggs) do
-			consolePrint(
-				"Slot "
-					.. egg.Slot
-					.. " = "
-					.. tostring(egg.Name)
-					.. " | "
-					.. tostring(egg.Rarity or "Unknown")
-					.. " | "
-					.. tostring(egg.LabelText)
-			)
-		end
-
-		consolePrint("===========================================")
-	end,
-})
-
-SettingsTab:AddButton({
-	Name = "Destroy UI",
-	Callback = function()
-		cleanupCurrentScript()
-	end,
-})
-
---// LOOPS
-
-spawnManaged(function()
-	while not ENV.Stop do
-		if State.AutoRoll then
-			if State.AutoBuySelectedSeeds or State.AutoBuySelectedSeedRarities then
-				local boughtCount = buySelectedSeedsFromCurrentRoll()
-
-				if boughtCount > 0 then
-					task.wait(0.05)
-				end
+	spawnManaged(function()
+		while not ENV.Stop do
+			if State.AutoBuyAllGear then
+				buyAllGearOnce()
+				task.wait(math.max(1, State.GearDelay))
+			else
+				task.wait(0.25)
 			end
-
-			rollSeeds()
-
-			task.wait(math.max(0.5, State.RollDelay))
-		else
-			task.wait(0.25)
 		end
-	end
-end)
+	end)
 
-spawnManaged(function()
-	while not ENV.Stop do
-		if State.AutoBuyAllGear then
-			buyAllGearOnce()
-			task.wait(math.max(1, State.GearDelay))
-		else
-			task.wait(0.25)
+	spawnManaged(function()
+		while not ENV.Stop do
+			if State.AutoBuyAllEggs or State.AutoBuySelectedEggRarities then
+				buyEggsOnce(State.AutoBuyAllEggs)
+				task.wait(math.max(1, State.EggDelay))
+			else
+				task.wait(0.25)
+			end
 		end
-	end
-end)
+	end)
 
-spawnManaged(function()
-	while not ENV.Stop do
-		if State.AutoBuyAllEggs or State.AutoBuySelectedEggRarities then
-			buyEggsOnce(State.AutoBuyAllEggs)
-			task.wait(math.max(1, State.EggDelay))
-		else
-			task.wait(0.25)
+	spawnManaged(function()
+		while not ENV.Stop do
+			if State.AutoCompost then
+				compostSelectedSeedsOnce(true)
+				task.wait(math.max(1, State.CompostDelay))
+			else
+				task.wait(0.25)
+			end
 		end
-	end
-end)
+	end)
 
-spawnManaged(function()
-	while not ENV.Stop do
-		if State.AutoCompost then
-			compostSelectedSeedsOnce(true)
-			task.wait(math.max(1, State.CompostDelay))
-		else
-			task.wait(0.25)
+	spawnManaged(function()
+		while not ENV.Stop do
+			if State.AutoUpgradePlants then
+				local startedAt = os.clock()
+
+				upgradePlantsOnce(true)
+
+				local elapsed = os.clock() - startedAt
+				task.wait(math.max(0, math.max(1, State.PlantUpgradeDelay) - elapsed))
+			else
+				task.wait(0.25)
+			end
 		end
-	end
-end)
+	end)
 
-spawnManaged(function()
-	while not ENV.Stop do
-		if State.AutoUpgradePlants then
-			local startedAt = os.clock()
-
-			upgradePlantsOnce(true)
-
-			local elapsed = os.clock() - startedAt
-			task.wait(math.max(0, math.max(2.5, State.PlantUpgradeDelay) - elapsed))
-		else
-			task.wait(0.25)
+	spawnManaged(function()
+		while not ENV.Stop do
+			if State.AutoPlantSeeds then
+				plantSeedsOnce(true)
+				task.wait(math.max(1, State.PlantSeedDelay))
+			else
+				task.wait(0.25)
+			end
 		end
-	end
-end)
+	end)
 
-spawnManaged(function()
-	while not ENV.Stop do
-		if State.AutoPlantSeeds then
-			plantSeedsOnce(true)
-			task.wait(math.max(1, State.PlantSeedDelay))
-		else
-			task.wait(0.25)
+	spawnManaged(function()
+		while not ENV.Stop do
+			if State.AutoSprayPlants then
+				sprayPlantsOnce(true)
+				task.wait(math.max(1, State.SprayDelay))
+			else
+				task.wait(0.25)
+			end
 		end
-	end
-end)
+	end)
 
-spawnManaged(function()
-	while not ENV.Stop do
-		if State.AutoSprayPlants then
-			sprayPlantsOnce(true)
-			task.wait(math.max(1, State.SprayDelay))
-		else
-			task.wait(0.25)
+	spawnManaged(function()
+		while not ENV.Stop do
+			if State.AutoSell then
+				sellCrates()
+				task.wait(math.max(1, State.SellDelay))
+			else
+				task.wait(0.25)
+			end
 		end
-	end
-end)
+	end)
 
-spawnManaged(function()
-	while not ENV.Stop do
-		if State.AutoSell then
-			sellCrates()
-			task.wait(math.max(1, State.SellDelay))
-		else
-			task.wait(0.25)
-		end
-	end
-end)
+	--// INIT
 
---// INIT
+	refreshSeedDropdown()
+	refreshCompostSeedDropdown()
+	refreshPlantSeedDropdown()
+	refreshSprayDropdown()
+	updateSelectedSeedsLabel()
+	updateSelectedSeedRaritiesLabel()
+	updateSelectedEggRaritiesLabel()
+	updateCompostSeedLabel()
+	updateSelectedPlantSeedLabel()
+	updateSelectedSprayLabel()
+	updateStatsLabels()
+	updatePlantViewerLabel(true)
+end
 
-refreshSeedDropdown()
-refreshCompostSeedDropdown()
-refreshPlantSeedDropdown()
-refreshSprayDropdown()
-updateSelectedSeedsLabel()
-updateSelectedSeedRaritiesLabel()
-updateSelectedEggRaritiesLabel()
-updateCompostSeedLabel()
-updateSelectedPlotFloorsLabel()
-updateSelectedPlantSeedLabel()
-updateSelectedSprayLabel()
-updateStatsLabels()
-updatePlantViewerLabel(true)
+buildUI()
 
 OrionLib:MakeNotification({
 	Name = "Loaded",
