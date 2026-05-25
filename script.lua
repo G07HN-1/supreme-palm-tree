@@ -175,12 +175,16 @@ local FarmDirtCache = nil
 local FarmDirtCachePlot = nil
 local FarmDirtCacheFloorKey = nil
 local FarmDirtCacheTime = 0
+local PlantRushTargetRoots = {}
+local PlantRushTargetCacheTime = 0
+local LastPlantRushRemoteWarn = 0
 local GearBuyItemDelay = 0.2
 local EggBuyItemDelay = 0.2
 local PlantUpgradePassDuration = 2.5
 local PlantUpgradeBatchSize = 30
 local PlantRemovePassDuration = 5
 local FarmDirtCacheTTL = 5
+local PlantRushTargetCacheTTL = 0.4
 local FarmFloorPaths = {
 	{
 		Name = "Floor 1",
@@ -307,6 +311,8 @@ local function clearRuntimeCaches()
 	FarmDirtCachePlot = nil
 	FarmDirtCacheFloorKey = nil
 	FarmDirtCacheTime = 0
+	table.clear(PlantRushTargetRoots)
+	PlantRushTargetCacheTime = 0
 end
 
 local function cleanupCurrentScript()
@@ -1781,49 +1787,79 @@ local function getPlantRushRuntime()
 end
 
 local function findPlantRushMonster(mob)
-	local monster = nil
-
-	for _, descendant in ipairs(mob:GetDescendants()) do
-		if descendant.Name:lower():find("monster", 1, true) then
-			monster = descendant
-			break
+	for _, child in ipairs(mob:GetChildren()) do
+		if child.Name:lower():find("monster", 1, true) then
+			return child
 		end
 	end
 
-	if monster then
-		return monster
+	for _, descendant in ipairs(mob:GetDescendants()) do
+		if descendant.Name:lower():find("monster", 1, true) then
+			return descendant
+		end
 	end
 
 	return nil
 end
 
-local function getPlantRushTargets()
+local function getPlantRushTargetPart(monster)
+	if not monster then
+		return nil
+	end
+
+	if monster:IsA("BasePart") then
+		return monster
+	end
+
+	local rootPart = monster:FindFirstChild("HumanoidRootPart", true)
+
+	if rootPart and rootPart:IsA("BasePart") then
+		return rootPart
+	end
+
+	return monster
+end
+
+local function getPlantRushTargetRoots(forceRefresh)
+	local now = os.clock()
+
+	if not forceRefresh and now - PlantRushTargetCacheTime < PlantRushTargetCacheTTL then
+		return PlantRushTargetRoots
+	end
+
 	local runtime = getPlantRushRuntime()
-	local targets = {}
+	table.clear(PlantRushTargetRoots)
+	PlantRushTargetCacheTime = now
 
 	if not runtime then
-		return targets
+		return PlantRushTargetRoots
 	end
 
 	for _, mob in ipairs(runtime:GetChildren()) do
 		if mob.Name:lower():find("plant", 1, true) then
 			local monster = findPlantRushMonster(mob)
-			local monsterCFrame = getInstanceCFrame(monster)
+			local targetRoot = getPlantRushTargetPart(monster)
 
-			if monsterCFrame then
-				table.insert(targets, monsterCFrame.Position)
+			if targetRoot and targetRoot.Parent then
+				table.insert(PlantRushTargetRoots, targetRoot)
 			end
 		end
 	end
 
-	return targets
+	return PlantRushTargetRoots
 end
 
 local function shootPlantRushTargetsOnce()
 	local remote = getPlantRushShootRemote()
 
 	if not remote then
-		consoleWarn("[EVENT] PlantRush Shoot remote not found.")
+		local now = os.clock()
+
+		if now - LastPlantRushRemoteWarn > 5 then
+			LastPlantRushRemoteWarn = now
+			consoleWarn("[EVENT] PlantRush Shoot remote not found.")
+		end
+
 		return 0
 	end
 
@@ -1842,9 +1878,16 @@ local function shootPlantRushTargetsOnce()
 
 	local shotCount = 0
 
-	for _, targetPosition in ipairs(getPlantRushTargets()) do
+	for _, targetRoot in ipairs(getPlantRushTargetRoots(false)) do
 		if ENV.Stop or not State.AutoPlantRushShoot then
 			break
+		end
+
+		local targetCFrame = getInstanceCFrame(targetRoot)
+		local targetPosition = targetCFrame and targetCFrame.Position
+
+		if not targetPosition then
+			continue
 		end
 
 		local offset = targetPosition - origin
@@ -1862,7 +1905,7 @@ local function shootPlantRushTargetsOnce()
 			end
 		end
 
-		task.wait(0.05)
+		task.wait(0.01)
 	end
 
 	return shotCount
@@ -4229,7 +4272,7 @@ local function buildUI()
 		while not ENV.Stop do
 			if State.AutoPlantRushShoot then
 				shootPlantRushTargetsOnce()
-				task.wait(0.15)
+				task.wait(0.03)
 			else
 				task.wait(0.25)
 			end
