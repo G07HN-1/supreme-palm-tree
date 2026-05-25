@@ -60,6 +60,8 @@ local UpgradePlantRemote = Remotes:FindFirstChild("UpgradePlant")
 local RemovePlantRemote = Remotes:FindFirstChild("RemovePlant")
 local UseSprayRemote = Remotes:FindFirstChild("UseSpray")
 local PlantSeedRemote = Remotes:FindFirstChild("PlantSeed")
+local PlantRushRemote = Remotes:FindFirstChild("PlantRush")
+local PlantRushShootRemote = PlantRushRemote and PlantRushRemote:FindFirstChild("Shoot")
 
 local GearRemote = Remotes:FindFirstChild("Gear")
 local GearTransaction = GearRemote and GearRemote:FindFirstChild("Transaction")
@@ -119,6 +121,7 @@ local State = {
 	AutoUpgradePlants = false,
 	AutoSprayPlants = false,
 	AutoPlantSeeds = false,
+	AutoPlantRushShoot = false,
 	AntiAFK = true,
 
 	SelectedSeedOption = nil,
@@ -733,6 +736,7 @@ local function getConfigData()
 		AutoUpgradePlants = State.AutoUpgradePlants,
 		AutoSprayPlants = State.AutoSprayPlants,
 		AutoPlantSeeds = State.AutoPlantSeeds,
+		AutoPlantRushShoot = State.AutoPlantRushShoot,
 		AntiAFK = State.AntiAFK,
 		SelectedSeedOption = State.SelectedSeedOption,
 		SelectedSeeds = getSelectedSeedList(),
@@ -805,6 +809,7 @@ local function loadConfig()
 		"AutoUpgradePlants",
 		"AutoSprayPlants",
 		"AutoPlantSeeds",
+		"AutoPlantRushShoot",
 		"AntiAFK",
 		"WebhookSeedPurchases",
 		"WebhookExpensiveGear",
@@ -1197,6 +1202,17 @@ local function getPlantSeedRemote()
 	PlantSeedRemote = PlantSeedRemote or Remotes:FindFirstChild("PlantSeed") or Remotes:WaitForChild("PlantSeed", 5)
 
 	return PlantSeedRemote
+end
+
+local function getPlantRushShootRemote()
+	if PlantRushShootRemote and PlantRushShootRemote.Parent then
+		return PlantRushShootRemote
+	end
+
+	PlantRushRemote = PlantRushRemote or Remotes:FindFirstChild("PlantRush")
+	PlantRushShootRemote = PlantRushRemote and PlantRushRemote:FindFirstChild("Shoot")
+
+	return PlantRushShootRemote
 end
 
 local function invalidateFarmDirtCache()
@@ -1723,6 +1739,133 @@ local function getPacedPlantDelay(actionCount, passDuration)
 	end
 
 	return passDuration / (actionCount - 1)
+end
+
+local function getInstanceCFrame(instance)
+	if not instance then
+		return nil
+	end
+
+	local rootPart = instance:FindFirstChild("HumanoidRootPart", true)
+
+	if rootPart and rootPart:IsA("BasePart") then
+		return rootPart.CFrame
+	end
+
+	if instance:IsA("BasePart") then
+		return instance.CFrame
+	end
+
+	if instance:IsA("Attachment") then
+		return instance.WorldCFrame
+	end
+
+	if instance:IsA("Model") then
+		local ok, pivot = pcall(function()
+			return instance:GetPivot()
+		end)
+
+		if ok then
+			return pivot
+		end
+	end
+
+	return nil
+end
+
+local function getPlantRushRuntime()
+	local interactiveEvents = Workspace:FindFirstChild("InteractiveEvents")
+	local plantRush = interactiveEvents and interactiveEvents:FindFirstChild("PlantRush")
+
+	return plantRush and plantRush:FindFirstChild("Runtime")
+end
+
+local function findPlantRushMonster(mob)
+	local monster = nil
+
+	for _, descendant in ipairs(mob:GetDescendants()) do
+		if descendant.Name:lower():find("monster", 1, true) then
+			monster = descendant
+			break
+		end
+	end
+
+	if monster then
+		return monster
+	end
+
+	return nil
+end
+
+local function getPlantRushTargets()
+	local runtime = getPlantRushRuntime()
+	local targets = {}
+
+	if not runtime then
+		return targets
+	end
+
+	for _, mob in ipairs(runtime:GetChildren()) do
+		if mob.Name:lower():find("plant", 1, true) then
+			local monster = findPlantRushMonster(mob)
+			local monsterCFrame = getInstanceCFrame(monster)
+
+			if monsterCFrame then
+				table.insert(targets, monsterCFrame.Position)
+			end
+		end
+	end
+
+	return targets
+end
+
+local function shootPlantRushTargetsOnce()
+	local remote = getPlantRushShootRemote()
+
+	if not remote then
+		consoleWarn("[EVENT] PlantRush Shoot remote not found.")
+		return 0
+	end
+
+	local camera = Workspace.CurrentCamera
+	local origin = camera and camera.CFrame.Position
+
+	if not origin then
+		local character = LocalPlayer.Character
+		local root = character and character:FindFirstChild("HumanoidRootPart")
+		origin = root and root.Position
+	end
+
+	if not origin then
+		return 0
+	end
+
+	local shotCount = 0
+
+	for _, targetPosition in ipairs(getPlantRushTargets()) do
+		if ENV.Stop or not State.AutoPlantRushShoot then
+			break
+		end
+
+		local offset = targetPosition - origin
+
+		if offset.Magnitude > 0 then
+			local direction = offset.Unit
+			local ok, err = pcall(function()
+				remote:FireServer(origin, direction, targetPosition)
+			end)
+
+			if ok then
+				shotCount += 1
+			else
+				consoleWarn("[EVENT SHOOT FAILED]", err)
+			end
+		end
+
+		task.wait(0.05)
+	end
+
+	return shotCount
 end
 
 local function getMyGearStockFolder()
@@ -2897,6 +3040,12 @@ local function buildUI()
 		PremiumOnly = false,
 	})
 
+	local EventTab = Window:MakeTab({
+		Name = "Event",
+		Icon = "target",
+		PremiumOnly = false,
+	})
+
 	local AutoBuyTab = Window:MakeTab({
 		Name = "Auto Buy",
 		Icon = "shopping-cart",
@@ -3760,6 +3909,22 @@ local function buildUI()
 		end,
 	})
 
+	--// EVENT TAB
+
+	EventTab:AddSection({
+		Name = "Plant Rush",
+	})
+
+	EventTab:AddToggle({
+		Name = "Auto Shoot",
+		Default = State.AutoPlantRushShoot,
+		Callback = function(value)
+			State.AutoPlantRushShoot = value
+			saveConfig()
+			consolePrint("[TOGGLE] Auto PlantRush Shoot:", value)
+		end,
+	})
+
 	--// AUTO BUY TAB
 
 	AutoBuyTab:AddSection({
@@ -4054,6 +4219,17 @@ local function buildUI()
 			if State.AutoSprayPlants then
 				sprayPlantsOnce(true)
 				task.wait(math.max(1, State.SprayDelay))
+			else
+				task.wait(0.25)
+			end
+		end
+	end)
+
+	spawnManaged(function()
+		while not ENV.Stop do
+			if State.AutoPlantRushShoot then
+				shootPlantRushTargetsOnce()
+				task.wait(0.15)
 			else
 				task.wait(0.25)
 			end
