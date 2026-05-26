@@ -63,6 +63,7 @@ local PlantSeedRemote = Remotes:FindFirstChild("PlantSeed")
 local PlantRushRemote = Remotes:FindFirstChild("PlantRush")
 local PlantRushShootRemote = PlantRushRemote and PlantRushRemote:FindFirstChild("Shoot")
 local PlantRushDropClaimRemote = PlantRushRemote and PlantRushRemote:FindFirstChild("DropClaim")
+local PlotUpgradeTransactionRemote = Remotes:FindFirstChild("PlotUpgradeTransaction")
 
 local GearRemote = Remotes:FindFirstChild("Gear")
 local GearTransaction = GearRemote and GearRemote:FindFirstChild("Transaction")
@@ -121,10 +122,11 @@ local State = {
 	AutoCompost = false,
 	AutoUpgradePlants = false,
 	AutoSprayPlants = false,
+	AutoFertilizePlants = false,
 	AutoPlantSeeds = false,
 	AutoPlantRushShoot = false,
 	AutoPlantRushPickup = false,
-	AutoQueenBeeHoneycomb = false,
+	AutoUpgradePlotFloors = false,
 	AntiAFK = true,
 
 	SelectedSeedOption = nil,
@@ -137,6 +139,8 @@ local State = {
 	SelectedCompostSeeds = {},
 	SelectedSprayOption = nil,
 	SelectedSprayBaseName = nil,
+	SelectedFertilizerOption = nil,
+	SelectedFertilizerBaseName = nil,
 	SelectedPlantSeedOption = nil,
 	SelectedPlotFloorOption = "All Floors",
 	SelectedPlotFloors = {
@@ -151,7 +155,10 @@ local State = {
 	PlantUpgradeDelay = 2.5,
 	PlantUpgradeTargetLevel = 40,
 	SprayDelay = 5,
+	FertilizerDelay = 5,
 	PlantSeedDelay = 5,
+	PlotUpgradeTargetLevel = 500,
+	PlotUpgradeDelay = 2.5,
 
 	WebhookURL = "",
 	WebhookSeedPurchases = true,
@@ -171,6 +178,13 @@ local SeedOptionMap = {}
 local CompostSeedOptionMap = {}
 local PlantSeedOptionMap = {}
 local SprayOptionMap = {}
+local Fertilizer = {
+	Remote = Remotes:FindFirstChild("UseFertilizer"),
+	OptionMap = {},
+	Applied = {},
+	ApplyDelay = 0.18,
+	IsRunning = false,
+}
 local GearNamesCache = nil
 local GearPriceCache = {}
 local PlotCache = nil
@@ -196,16 +210,19 @@ local FarmFloorPaths = {
 		Name = "Floor 1",
 		Path = {},
 		Order = 1,
+		UpgradeFloorId = "Floor1",
 	},
 	{
 		Name = "Floor 2",
 		Path = { "SecondFloor" },
 		Order = 2,
+		UpgradeFloorId = "Floor2",
 	},
 	{
 		Name = "Floor 3",
 		Path = { "ThirdFloor" },
 		Order = 3,
+		UpgradeFloorId = "Floor3",
 	},
 }
 local PlotFloorOptions = {
@@ -214,7 +231,20 @@ local PlotFloorOptions = {
 	"Floor 2",
 	"Floor 3",
 }
+local PlotUpgradeOptions = {
+	{
+		RemoteName = "ExtraPower",
+		DisplayName = "Saw Power",
+		GuiNames = { "SawPower", "SawStrength", "SawDamage", "ExtraPower", "Power", "Strength", "Damage" },
+	},
+	{
+		RemoteName = "ExtraYield",
+		DisplayName = "Saw Yield",
+		GuiNames = { "SawYield", "ExtraYield", "Yield" },
+	},
+}
 local IsUpgradingPlants = false
+local IsUpgradingPlotFloors = false
 local IsRemovingPlants = false
 local IsSprayingPlants = false
 local IsPlantingSeeds = false
@@ -300,8 +330,10 @@ end
 
 local function clearActionLocks()
 	IsUpgradingPlants = false
+	IsUpgradingPlotFloors = false
 	IsRemovingPlants = false
 	IsSprayingPlants = false
+	Fertilizer.IsRunning = false
 	IsPlantingSeeds = false
 end
 
@@ -310,6 +342,8 @@ local function clearRuntimeCaches()
 	table.clear(CompostSeedOptionMap)
 	table.clear(PlantSeedOptionMap)
 	table.clear(SprayOptionMap)
+	table.clear(Fertilizer.OptionMap)
+	table.clear(Fertilizer.Applied)
 	table.clear(GearPriceCache)
 	GearNamesCache = nil
 	PlotCache = nil
@@ -407,6 +441,8 @@ local updateStatsLabels
 local PlantViewerLabel
 local updatePlantViewerLabel
 local updateSelectedPlotFloorsLabel
+local PlotUpgradeSummaryLabel
+local updatePlotUpgradeSummaryLabel
 
 local function incrementCount(map, key)
 	key = tostring(key or "Unknown")
@@ -747,10 +783,11 @@ local function getConfigData()
 		AutoCompost = State.AutoCompost,
 		AutoUpgradePlants = State.AutoUpgradePlants,
 		AutoSprayPlants = State.AutoSprayPlants,
+		AutoFertilizePlants = State.AutoFertilizePlants,
 		AutoPlantSeeds = State.AutoPlantSeeds,
 		AutoPlantRushShoot = State.AutoPlantRushShoot,
 		AutoPlantRushPickup = State.AutoPlantRushPickup,
-		AutoQueenBeeHoneycomb = State.AutoQueenBeeHoneycomb,
+		AutoUpgradePlotFloors = State.AutoUpgradePlotFloors,
 		AntiAFK = State.AntiAFK,
 		SelectedSeedOption = State.SelectedSeedOption,
 		SelectedSeeds = getSelectedSeedList(),
@@ -762,6 +799,8 @@ local function getConfigData()
 		SelectedCompostSeeds = getSelectedCompostSeedList(),
 		SelectedSprayOption = State.SelectedSprayOption,
 		SelectedSprayBaseName = State.SelectedSprayBaseName,
+		SelectedFertilizerOption = State.SelectedFertilizerOption,
+		SelectedFertilizerBaseName = State.SelectedFertilizerBaseName,
 		SelectedPlantSeedOption = State.SelectedPlantSeedOption,
 		SelectedPlotFloorOption = State.SelectedPlotFloorOption,
 		SelectedPlotFloors = getSelectedPlotFloorList(),
@@ -773,7 +812,10 @@ local function getConfigData()
 		PlantUpgradeDelay = State.PlantUpgradeDelay,
 		PlantUpgradeTargetLevel = State.PlantUpgradeTargetLevel,
 		SprayDelay = State.SprayDelay,
+		FertilizerDelay = State.FertilizerDelay,
 		PlantSeedDelay = State.PlantSeedDelay,
+		PlotUpgradeTargetLevel = State.PlotUpgradeTargetLevel,
+		PlotUpgradeDelay = State.PlotUpgradeDelay,
 		WebhookURL = State.WebhookURL,
 		WebhookSeedPurchases = State.WebhookSeedPurchases,
 		WebhookExpensiveGear = State.WebhookExpensiveGear,
@@ -822,10 +864,11 @@ local function loadConfig()
 		"AutoCompost",
 		"AutoUpgradePlants",
 		"AutoSprayPlants",
+		"AutoFertilizePlants",
 		"AutoPlantSeeds",
 		"AutoPlantRushShoot",
 		"AutoPlantRushPickup",
-		"AutoQueenBeeHoneycomb",
+		"AutoUpgradePlotFloors",
 		"AntiAFK",
 		"WebhookSeedPurchases",
 		"WebhookExpensiveGear",
@@ -844,7 +887,10 @@ local function loadConfig()
 		"PlantUpgradeDelay",
 		"PlantUpgradeTargetLevel",
 		"SprayDelay",
+		"FertilizerDelay",
 		"PlantSeedDelay",
+		"PlotUpgradeTargetLevel",
+		"PlotUpgradeDelay",
 		"ExpensiveThreshold",
 	}) do
 		if type(data[key]) == "number" then
@@ -854,7 +900,10 @@ local function loadConfig()
 
 	State.PlantUpgradeTargetLevel = math.clamp(math.floor(State.PlantUpgradeTargetLevel), 1, 100)
 	State.PlantUpgradeDelay = math.max(1, tonumber(State.PlantUpgradeDelay) or 1)
+	State.FertilizerDelay = math.max(1, tonumber(State.FertilizerDelay) or 5)
 	State.CompostDelay = math.clamp(tonumber(State.CompostDelay) or 5, 0.1, 5)
+	State.PlotUpgradeTargetLevel = math.clamp(math.floor(tonumber(State.PlotUpgradeTargetLevel) or 500), 1, 500)
+	State.PlotUpgradeDelay = math.max(0.5, tonumber(State.PlotUpgradeDelay) or 2.5)
 
 	if type(data.WebhookURL) == "string" then
 		State.WebhookURL = data.WebhookURL
@@ -882,6 +931,14 @@ local function loadConfig()
 
 	if type(data.SelectedSprayBaseName) == "string" then
 		State.SelectedSprayBaseName = data.SelectedSprayBaseName
+	end
+
+	if type(data.SelectedFertilizerOption) == "string" then
+		State.SelectedFertilizerOption = data.SelectedFertilizerOption
+	end
+
+	if type(data.SelectedFertilizerBaseName) == "string" then
+		State.SelectedFertilizerBaseName = data.SelectedFertilizerBaseName
 	end
 
 	if type(data.SelectedPlantSeedOption) == "string" then
@@ -1215,10 +1272,26 @@ local function getUseSprayRemote()
 	return UseSprayRemote
 end
 
+function Fertilizer.getRemote()
+	Fertilizer.Remote = Fertilizer.Remote
+		or Remotes:FindFirstChild("UseFertilizer")
+		or Remotes:WaitForChild("UseFertilizer", 5)
+
+	return Fertilizer.Remote
+end
+
 local function getPlantSeedRemote()
 	PlantSeedRemote = PlantSeedRemote or Remotes:FindFirstChild("PlantSeed") or Remotes:WaitForChild("PlantSeed", 5)
 
 	return PlantSeedRemote
+end
+
+local function getPlotUpgradeTransactionRemote()
+	PlotUpgradeTransactionRemote = PlotUpgradeTransactionRemote
+		or Remotes:FindFirstChild("PlotUpgradeTransaction")
+		or Remotes:WaitForChild("PlotUpgradeTransaction", 5)
+
+	return PlotUpgradeTransactionRemote
 end
 
 local function getPlantRushShootRemote()
@@ -1266,6 +1339,18 @@ local function shouldUseFarmFloor(floorInfo)
 	return State.SelectedPlotFloors[floorInfo.Name] == true
 end
 
+local function getSelectedFarmFloorInfos()
+	local floors = {}
+
+	for _, floorInfo in ipairs(FarmFloorPaths) do
+		if shouldUseFarmFloor(floorInfo) then
+			table.insert(floors, floorInfo)
+		end
+	end
+
+	return floors
+end
+
 local function selectPlotFloorOption(value)
 	if not isValidPlotFloorOption(value) then
 		return
@@ -1300,6 +1385,10 @@ local function selectPlotFloorOption(value)
 
 	if updatePlantViewerLabel then
 		updatePlantViewerLabel(true)
+	end
+
+	if updatePlotUpgradeSummaryLabel then
+		updatePlotUpgradeSummaryLabel(true)
 	end
 
 	saveConfig()
@@ -1434,6 +1523,222 @@ local function canRunPlotAction(quiet, actionName)
 	end
 
 	return false
+end
+
+local function getPlotUpgradeGuiRoot(plot, floorInfo)
+	local floorRoot = getNestedChild(plot, floorInfo.Path)
+	local sign = floorRoot
+		and (floorRoot:FindFirstChild("PlotUpgradeSign") or floorRoot:FindFirstChild("PlotUpgradeSign", true))
+	local screen = sign and (sign:FindFirstChild("Screen") or sign:FindFirstChild("Screen", true))
+
+	return screen and (screen:FindFirstChild("SurfaceGui") or screen:FindFirstChild("SurfaceGui", true))
+end
+
+local function getDescFromUpgradeFrame(frame)
+	if not frame then
+		return nil
+	end
+
+	local desc = frame:FindFirstChild("Desc", true)
+
+	if desc and (desc:IsA("TextLabel") or desc:IsA("TextButton") or desc:IsA("TextBox")) then
+		return desc
+	end
+
+	return nil
+end
+
+local function findPlotUpgradeDesc(guiRoot, upgradeInfo)
+	if not guiRoot then
+		return nil
+	end
+
+	for _, guiName in ipairs(upgradeInfo.GuiNames) do
+		local frame = guiRoot:FindFirstChild(guiName, true)
+		local desc = getDescFromUpgradeFrame(frame)
+
+		if desc then
+			return desc
+		end
+	end
+
+	local keyword = upgradeInfo.DisplayName:lower():match("yield") and "yield" or "power"
+
+	for _, obj in ipairs(guiRoot:GetDescendants()) do
+		if obj.Name:lower():find(keyword, 1, true) then
+			local desc = getDescFromUpgradeFrame(obj)
+
+			if desc then
+				return desc
+			end
+		end
+	end
+
+	return nil
+end
+
+local function getFirstUpgradeNumber(text)
+	local value = tostring(text or ""):match("([%d][%d,%.]*%s*[xX%%]?)")
+
+	if not value then
+		return "?"
+	end
+
+	return trim(value:gsub("%s+", ""))
+end
+
+local function parseUpgradeAmountValue(amountText)
+	local cleaned = tostring(amountText or ""):gsub(",", "")
+	local value = tonumber(cleaned:match("([%d%.]+)"))
+
+	if not value then
+		return nil
+	end
+
+	return math.floor(value)
+end
+
+local function getPlotUpgradeAmount(plot, floorInfo, upgradeInfo)
+	local guiRoot = getPlotUpgradeGuiRoot(plot, floorInfo)
+	local desc = findPlotUpgradeDesc(guiRoot, upgradeInfo)
+
+	if not desc then
+		return "?"
+	end
+
+	return getFirstUpgradeNumber(getText(desc))
+end
+
+local function getPlotUpgradeAmountInfo(plot, floorInfo, upgradeInfo)
+	local amountText = getPlotUpgradeAmount(plot, floorInfo, upgradeInfo)
+
+	return amountText, parseUpgradeAmountValue(amountText)
+end
+
+local function formatPlotUpgradeSummary()
+	local plot = findMyPlot()
+
+	if not plot then
+		return "Waiting for your plot to load."
+	end
+
+	local lines = {}
+
+	for _, floorInfo in ipairs(getSelectedFarmFloorInfos()) do
+		local values = {}
+
+		for _, upgradeInfo in ipairs(PlotUpgradeOptions) do
+			local amountText = getPlotUpgradeAmount(plot, floorInfo, upgradeInfo)
+
+			table.insert(values, upgradeInfo.DisplayName .. ": " .. amountText)
+		end
+
+		table.insert(lines, floorInfo.Name .. ": " .. table.concat(values, " | "))
+	end
+
+	if #lines == 0 then
+		return "No floors selected."
+	end
+
+	return table.concat(lines, "\n")
+end
+
+local function invokePlotUpgradeTransaction(upgradeName, floorId)
+	local remote = getPlotUpgradeTransactionRemote()
+
+	if not remote then
+		return false, "PlotUpgradeTransaction remote not found."
+	end
+
+	local ok, result = pcall(function()
+		return remote:InvokeServer(upgradeName, floorId)
+	end)
+
+	if not ok then
+		return false, result
+	end
+
+	return true, result
+end
+
+local function upgradePlotFloorsOnce(quiet)
+	if IsUpgradingPlotFloors then
+		if not quiet then
+			OrionLib:MakeNotification({
+				Name = "Plot Upgrades",
+				Content = "A plot upgrade pass is already running.",
+				Time = 3,
+			})
+		end
+
+		return 0
+	end
+
+	if not canRunPlotAction(quiet, "Plot Upgrades") then
+		return 0
+	end
+
+	IsUpgradingPlotFloors = true
+
+	local plot = findMyPlot()
+	local targetLevel = math.clamp(math.floor(tonumber(State.PlotUpgradeTargetLevel) or 500), 1, 500)
+	local sent = 0
+	local failed = 0
+	local skipped = 0
+
+	for _, floorInfo in ipairs(getSelectedFarmFloorInfos()) do
+		if ENV.Stop then
+			break
+		end
+
+		for _, upgradeInfo in ipairs(PlotUpgradeOptions) do
+			if ENV.Stop then
+				break
+			end
+
+			local _, amountValue = getPlotUpgradeAmountInfo(plot, floorInfo, upgradeInfo)
+
+			if not amountValue or amountValue >= targetLevel then
+				skipped += 1
+				continue
+			end
+
+			local ok, err = invokePlotUpgradeTransaction(upgradeInfo.RemoteName, floorInfo.UpgradeFloorId)
+
+			if ok then
+				sent += 1
+			else
+				failed += 1
+				consoleWarn("[PLOT FLOOR UPGRADE FAILED]", upgradeInfo.RemoteName, floorInfo.UpgradeFloorId, err)
+			end
+
+			task.wait(0.1)
+		end
+	end
+
+	IsUpgradingPlotFloors = false
+
+	if updatePlotUpgradeSummaryLabel then
+		updatePlotUpgradeSummaryLabel(true)
+	end
+
+	if not quiet then
+		OrionLib:MakeNotification({
+			Name = "Plot Upgrades",
+			Content = "Sent "
+				.. tostring(sent)
+				.. " requests. Skipped "
+				.. tostring(skipped)
+				.. " at target. Failed "
+				.. tostring(failed)
+				.. ".",
+			Time = 3,
+		})
+	end
+
+	consolePrint("[PLOT FLOOR UPGRADE] sent:", sent, "skipped:", skipped, "failed:", failed, "target:", targetLevel)
+
+	return sent
 end
 
 local function isPlantedDirt(dirt)
@@ -1758,6 +2063,152 @@ local function equipSprayTool(tool)
 	return equipTool(tool)
 end
 
+function Fertilizer.getBaseName(fertilizerName)
+	return tostring(fertilizerName or ""):gsub("%s*%([xX]%d+%)%s*$", "")
+end
+
+function Fertilizer.addToolsFrom(container, tools)
+	if not container then
+		return
+	end
+
+	for _, item in ipairs(container:GetChildren()) do
+		if item:IsA("Tool") and item.Name:lower():find("fertil", 1, true) then
+			table.insert(tools, item)
+		end
+	end
+end
+
+function Fertilizer.getTools()
+	local tools = {}
+
+	Fertilizer.addToolsFrom(LocalPlayer:FindFirstChild("Backpack"), tools)
+	Fertilizer.addToolsFrom(LocalPlayer.Character, tools)
+
+	table.sort(tools, function(a, b)
+		return a.Name < b.Name
+	end)
+
+	return tools
+end
+
+function Fertilizer.getSelectedTool()
+	local exact = State.SelectedFertilizerOption
+
+	if not exact or exact == "Select Fertilizer" or exact == "No Fertilizers Found" then
+		return nil
+	end
+
+	if exact and Fertilizer.OptionMap[exact] and Fertilizer.OptionMap[exact].Parent then
+		return Fertilizer.OptionMap[exact]
+	end
+
+	local targetBase = State.SelectedFertilizerBaseName or Fertilizer.getBaseName(exact)
+
+	if targetBase == "" then
+		return nil
+	end
+
+	for _, tool in ipairs(Fertilizer.getTools()) do
+		if Fertilizer.getBaseName(tool.Name) == targetBase then
+			return tool
+		end
+	end
+
+	return nil
+end
+
+function Fertilizer.equipTool(tool)
+	return equipTool(tool)
+end
+
+function Fertilizer.getDirtKey(dirt)
+	if not dirt then
+		return nil
+	end
+
+	local plantId = dirt:GetAttribute("PlantId")
+		or dirt:GetAttribute("PlantID")
+		or dirt:GetAttribute("PlantGuid")
+		or dirt:GetAttribute("PlantGUID")
+		or dirt:GetAttribute("PlantUUID")
+		or dirt:GetAttribute("PlantTag")
+		or dirt:GetAttribute("PlantName")
+
+	return dirt:GetFullName() .. "|" .. tostring(plantId or "")
+end
+
+function Fertilizer.isFertilizerValueActive(value)
+	if type(value) == "boolean" then
+		return value
+	end
+
+	if type(value) == "number" then
+		return value > 0
+	end
+
+	if type(value) == "string" then
+		local cleaned = trim(value):lower()
+
+		return cleaned ~= "" and cleaned ~= "none" and cleaned ~= "false" and cleaned ~= "0"
+	end
+
+	return value ~= nil
+end
+
+function Fertilizer.hasFertilizerState(dirt)
+	if not dirt then
+		return false
+	end
+
+	for key, value in pairs(dirt:GetAttributes()) do
+		local lowerKey = tostring(key):lower()
+
+		if
+			lowerKey:find("fertil", 1, true)
+			and not lowerKey:find("can", 1, true)
+			and not lowerKey:find("need", 1, true)
+			and not lowerKey:find("require", 1, true)
+			and not lowerKey:find("cost", 1, true)
+			and not lowerKey:find("price", 1, true)
+			and Fertilizer.isFertilizerValueActive(value)
+		then
+			return true
+		end
+	end
+
+	for _, child in ipairs(dirt:GetChildren()) do
+		local lowerName = child.Name:lower()
+
+		if lowerName:find("fertil", 1, true) and child:IsA("ValueBase") then
+			if Fertilizer.isFertilizerValueActive(child.Value) then
+				return true
+			end
+		end
+	end
+
+	return false
+end
+
+function Fertilizer.wasApplied(dirt)
+	local key = Fertilizer.getDirtKey(dirt)
+	local selected = State.SelectedFertilizerBaseName or State.SelectedFertilizerOption
+
+	return key and selected and Fertilizer.Applied[key] == selected
+end
+
+function Fertilizer.markApplied(dirt)
+	local key = Fertilizer.getDirtKey(dirt)
+
+	if key then
+		Fertilizer.Applied[key] = State.SelectedFertilizerBaseName or State.SelectedFertilizerOption or true
+	end
+end
+
+function Fertilizer.shouldSkipDirt(dirt)
+	return Fertilizer.wasApplied(dirt) or Fertilizer.hasFertilizerState(dirt)
+end
+
 local function getPacedPlantDelay(actionCount, passDuration)
 	actionCount = math.max(0, tonumber(actionCount) or 0)
 	passDuration = math.max(0, tonumber(passDuration) or 0)
@@ -1973,95 +2424,6 @@ local function shootPlantRushTargetsOnce()
 	end
 
 	return shotCount
-end
-
-local function getQueenBeeHoneycombFolder()
-	local interactiveEvents = Workspace:FindFirstChild("InteractiveEvents")
-	local queenBee = interactiveEvents and interactiveEvents:FindFirstChild("QueenBee")
-
-	return queenBee and queenBee:FindFirstChild("RuntimeHoneycombs")
-end
-
-local function getCharacterRoot()
-	local character = LocalPlayer.Character
-
-	return character and character:FindFirstChild("HumanoidRootPart")
-end
-
-local function getPromptPart(prompt)
-	local current = prompt and prompt.Parent
-
-	while current do
-		if current:IsA("BasePart") then
-			return current
-		end
-
-		current = current.Parent
-	end
-
-	return nil
-end
-
-local function movePromptNearCharacter(prompt, index)
-	local root = getCharacterRoot()
-	local promptPart = getPromptPart(prompt)
-
-	if not root or not promptPart then
-		return false
-	end
-
-	local offsetX = ((index - 1) % 3 - 1) * 2
-	local offsetZ = -4 - math.floor((index - 1) / 3) * 1.5
-
-	pcall(function()
-		promptPart.Anchored = true
-		promptPart.CFrame = root.CFrame * CFrame.new(offsetX, 0, offsetZ)
-	end)
-
-	return true
-end
-
-local function collectQueenBeeHoneycombsOnce()
-	if type(fireproximityprompt) ~= "function" then
-		return 0
-	end
-
-	local folder = getQueenBeeHoneycombFolder()
-
-	if not folder then
-		return 0
-	end
-
-	local collected = 0
-	local promptIndex = 0
-
-	for _, honeycombModel in ipairs(folder:GetChildren()) do
-		if ENV.Stop or not State.AutoQueenBeeHoneycomb then
-			break
-		end
-
-		local prompt = honeycombModel:FindFirstChild("CollectPrompt", true)
-
-		if prompt and prompt:IsA("ProximityPrompt") and prompt.Enabled then
-			promptIndex += 1
-
-			local ok, err = pcall(function()
-				movePromptNearCharacter(prompt, promptIndex)
-				prompt.RequiresLineOfSight = false
-				prompt.MaxActivationDistance = math.max(prompt.MaxActivationDistance, 30)
-				prompt.HoldDuration = 0
-				fireproximityprompt(prompt)
-			end)
-
-			if ok then
-				collected += 1
-			else
-				consoleWarn("[EVENT HONEYCOMB FAILED]", err)
-			end
-		end
-	end
-
-	return collected
 end
 
 local function getMyGearStockFolder()
@@ -3057,6 +3419,131 @@ local function sprayPlantsOnce(quiet)
 	return sprayed
 end
 
+function Fertilizer.run(quiet)
+	if Fertilizer.IsRunning then
+		if not quiet then
+			OrionLib:MakeNotification({
+				Name = "Plant Fertilizer",
+				Content = "A fertilizer pass is already running.",
+				Time = 3,
+			})
+		end
+
+		return 0
+	end
+
+	if not canRunPlotAction(quiet, "Plant Fertilizer") then
+		return 0
+	end
+
+	Fertilizer.IsRunning = true
+
+	local remote = Fertilizer.getRemote()
+	local plantedDirts = getPlantedDirts(false)
+	local fertilized = 0
+	local skipped = 0
+	local stoppedMissingTool = false
+
+	if not remote then
+		Fertilizer.IsRunning = false
+		consoleWarn("[PLOT] UseFertilizer remote not found.")
+		return 0
+	end
+
+	if not Fertilizer.getSelectedTool() then
+		Fertilizer.IsRunning = false
+
+		if not quiet then
+			OrionLib:MakeNotification({
+				Name = "Plant Fertilizer",
+				Content = "Pick a fertilizer from the Plot tab first.",
+				Time = 3,
+			})
+		end
+
+		return 0
+	end
+
+	if #plantedDirts == 0 then
+		Fertilizer.IsRunning = false
+
+		if not quiet then
+			OrionLib:MakeNotification({
+				Name = "Plant Fertilizer",
+				Content = "No planted dirt spots found on the selected floors.",
+				Time = 3,
+			})
+		end
+
+		consolePrint("[PLOT FERTILIZER] no planted dirt spots.")
+		return 0
+	end
+
+	for _, dirt in ipairs(plantedDirts) do
+		if ENV.Stop then
+			break
+		end
+
+		if not isPlantedDirt(dirt) or Fertilizer.shouldSkipDirt(dirt) then
+			skipped += 1
+			continue
+		end
+
+		local tool = Fertilizer.getSelectedTool()
+
+		if not tool or not Fertilizer.equipTool(tool) then
+			stoppedMissingTool = true
+			break
+		end
+
+		if isPlantedDirt(dirt) and not Fertilizer.shouldSkipDirt(dirt) then
+			local ok, err = pcall(function()
+				remote:FireServer(dirt)
+			end)
+
+			if ok then
+				fertilized += 1
+				Fertilizer.markApplied(dirt)
+			else
+				consoleWarn("[PLOT FERTILIZER FAILED]", dirt:GetFullName(), err)
+			end
+		end
+
+		task.wait(Fertilizer.ApplyDelay)
+	end
+
+	Fertilizer.IsRunning = false
+
+	if not quiet then
+		local content = "Fertilized " .. tostring(fertilized) .. " plants. Skipped " .. tostring(skipped) .. "."
+
+		if stoppedMissingTool then
+			content ..= " Stopped because the selected fertilizer was not available."
+		end
+
+		OrionLib:MakeNotification({
+			Name = "Plant Fertilizer",
+			Content = content,
+			Time = 3,
+		})
+	end
+
+	consolePrint(
+		"[PLOT FERTILIZER] fertilized:",
+		fertilized,
+		"skipped:",
+		skipped,
+		"stopped missing tool:",
+		stoppedMissingTool
+	)
+
+	if updatePlantViewerLabel then
+		updatePlantViewerLabel()
+	end
+
+	return fertilized
+end
+
 local function plantSeedsOnce(quiet)
 	if IsPlantingSeeds then
 		if not quiet then
@@ -3456,7 +3943,7 @@ local function buildUI()
 	--// EGGS TAB
 
 	EggsTab:AddSection({
-		Name = "Pet Merchant",
+		Name = "Egg Buying",
 	})
 
 	local SelectedEggRaritiesLabel
@@ -3552,19 +4039,6 @@ local function buildUI()
 			State.AutoBuyAllEggs = value
 			saveConfig()
 			consolePrint("[TOGGLE] Auto Buy All Eggs:", value)
-		end,
-	})
-
-	EggsTab:AddSlider({
-		Name = "Egg Buy Loop Delay",
-		Min = 1,
-		Max = 120,
-		Default = State.EggDelay,
-		Increment = 1,
-		ValueName = "sec",
-		Callback = function(value)
-			State.EggDelay = value
-			saveConfig()
 		end,
 	})
 
@@ -3697,19 +4171,6 @@ local function buildUI()
 		end,
 	})
 
-	CompostTab:AddSlider({
-		Name = "Compost Loop Delay",
-		Min = 0.1,
-		Max = 5,
-		Default = State.CompostDelay,
-		Increment = 0.1,
-		ValueName = "sec",
-		Callback = function(value)
-			State.CompostDelay = value
-			saveConfig()
-		end,
-	})
-
 	--// PLOT TAB
 
 	PlotTab:AddSection({
@@ -3744,23 +4205,48 @@ local function buildUI()
 	IsInitializingPlotFloorDropdown = false
 
 	PlotTab:AddSection({
-		Name = "Plant Viewer",
+		Name = "Floor Upgrades",
 	})
 
-	PlantViewerLabel = PlotTab:AddParagraph("Placed Plants", "Loading...")
+	PlotUpgradeSummaryLabel = PlotTab:AddParagraph("Selected Floor Upgrades", formatPlotUpgradeSummary())
 
-	function updatePlantViewerLabel(forceRefresh)
-		if not PlantViewerLabel then
+	function updatePlotUpgradeSummaryLabel()
+		if not PlotUpgradeSummaryLabel then
 			return
 		end
 
-		PlantViewerLabel:Set(formatPlacedPlantSummary(forceRefresh == true))
+		PlotUpgradeSummaryLabel:Set(formatPlotUpgradeSummary())
 	end
 
+	PlotTab:AddTextbox({
+		Name = "Target Floor Level",
+		Default = tostring(State.PlotUpgradeTargetLevel),
+		TextDisappear = false,
+		Callback = function(value)
+			local targetLevel = math.clamp(math.floor(tonumber(value) or State.PlotUpgradeTargetLevel), 1, 500)
+
+			State.PlotUpgradeTargetLevel = targetLevel
+			saveConfig()
+			consolePrint("[PLOT FLOOR UPGRADE] target:", targetLevel)
+		end,
+	})
+
 	PlotTab:AddButton({
-		Name = "Refresh Plant Viewer",
+		Name = "Upgrade Floor Levels Once",
 		Callback = function()
-			updatePlantViewerLabel(true)
+			spawnOneShot(function()
+				upgradePlotFloorsOnce(false)
+			end)
+		end,
+	})
+
+	PlotTab:AddToggle({
+		Name = "Auto Upgrade Floor Levels",
+		Default = State.AutoUpgradePlotFloors,
+		Callback = function(value)
+			State.AutoUpgradePlotFloors = value
+			saveConfig()
+			consolePrint("[TOGGLE] Auto Upgrade Plot Floors:", value)
 		end,
 	})
 
@@ -3797,19 +4283,6 @@ local function buildUI()
 			State.AutoUpgradePlants = value
 			saveConfig()
 			consolePrint("[TOGGLE] Auto Upgrade Plants:", value)
-		end,
-	})
-
-	PlotTab:AddSlider({
-		Name = "Upgrade Pass Delay",
-		Min = 1,
-		Max = 120,
-		Default = State.PlantUpgradeDelay,
-		Increment = 0.5,
-		ValueName = "sec",
-		Callback = function(value)
-			State.PlantUpgradeDelay = value
-			saveConfig()
 		end,
 	})
 
@@ -3928,19 +4401,6 @@ local function buildUI()
 			State.AutoPlantSeeds = value
 			saveConfig()
 			consolePrint("[TOGGLE] Auto Plant Seeds:", value)
-		end,
-	})
-
-	PlotTab:AddSlider({
-		Name = "Plant Pass Delay",
-		Min = 1,
-		Max = 120,
-		Default = State.PlantSeedDelay,
-		Increment = 1,
-		ValueName = "sec",
-		Callback = function(value)
-			State.PlantSeedDelay = value
-			saveConfig()
 		end,
 	})
 
@@ -4079,21 +4539,147 @@ local function buildUI()
 		end,
 	})
 
-	PlotTab:AddSlider({
-		Name = "Spray Pass Delay",
-		Min = 1,
-		Max = 120,
-		Default = State.SprayDelay,
-		Increment = 1,
-		ValueName = "sec",
+	PlotTab:AddSection({
+		Name = "Plant Fertilizer",
+	})
+
+	local IsRefreshingFertilizerDropdown = false
+	local FertilizerDropdown
+	local SelectedFertilizerLabel
+	local updateSelectedFertilizerLabel
+
+	SelectedFertilizerLabel = PlotTab:AddParagraph("Selected Fertilizer", State.SelectedFertilizerOption or "None")
+
+	function updateSelectedFertilizerLabel()
+		if not SelectedFertilizerLabel then
+			return
+		end
+
+		local tool = Fertilizer.getSelectedTool()
+
+		if tool then
+			SelectedFertilizerLabel:Set(tool.Name)
+		elseif State.SelectedFertilizerOption and State.SelectedFertilizerOption ~= "Select Fertilizer" then
+			SelectedFertilizerLabel:Set(State.SelectedFertilizerOption)
+		else
+			SelectedFertilizerLabel:Set("None")
+		end
+	end
+
+	FertilizerDropdown = PlotTab:AddDropdown({
+		Name = "Fertilizer Dropdown",
+		Default = "Select Fertilizer",
+		Options = {
+			"Select Fertilizer",
+		},
 		Callback = function(value)
-			State.SprayDelay = value
+			if IsRefreshingFertilizerDropdown then
+				return
+			end
+
+			if State.SelectedFertilizerOption ~= value then
+				table.clear(Fertilizer.Applied)
+			end
+
+			State.SelectedFertilizerOption = value
+
+			if value ~= "Select Fertilizer" and value ~= "No Fertilizers Found" then
+				State.SelectedFertilizerBaseName = Fertilizer.getBaseName(value)
+			else
+				State.SelectedFertilizerBaseName = nil
+			end
+
+			updateSelectedFertilizerLabel()
 			saveConfig()
+
+			if value ~= "Select Fertilizer" and value ~= "No Fertilizers Found" then
+				OrionLib:MakeNotification({
+					Name = "Fertilizer Selected",
+					Content = value .. " will be used for auto fertilizer.",
+					Time = 3,
+				})
+			end
+		end,
+	})
+
+	local function refreshFertilizerDropdown()
+		local tools = Fertilizer.getTools()
+		local options = {
+			"Select Fertilizer",
+		}
+		Fertilizer.OptionMap = {}
+
+		for _, tool in ipairs(tools) do
+			table.insert(options, tool.Name)
+			Fertilizer.OptionMap[tool.Name] = tool
+		end
+
+		if #tools == 0 then
+			options = {
+				"No Fertilizers Found",
+			}
+		end
+
+		IsRefreshingFertilizerDropdown = true
+		FertilizerDropdown:Refresh(options, true)
+		pcall(function()
+			local selected = State.SelectedFertilizerOption
+			local didSet = false
+
+			if selected and Fertilizer.OptionMap[selected] then
+				FertilizerDropdown:Set(selected)
+				didSet = true
+			elseif State.SelectedFertilizerBaseName then
+				for _, option in ipairs(options) do
+					if Fertilizer.getBaseName(option) == State.SelectedFertilizerBaseName then
+						State.SelectedFertilizerOption = option
+						FertilizerDropdown:Set(option)
+						didSet = true
+						break
+					end
+				end
+			end
+
+			if not didSet then
+				if #tools == 0 then
+					FertilizerDropdown:Set("No Fertilizers Found")
+				else
+					FertilizerDropdown:Set("Select Fertilizer")
+				end
+			end
+		end)
+		IsRefreshingFertilizerDropdown = false
+		updateSelectedFertilizerLabel()
+	end
+
+	PlotTab:AddButton({
+		Name = "Refresh Fertilizers",
+		Callback = function()
+			refreshFertilizerDropdown()
+		end,
+	})
+
+	PlotTab:AddButton({
+		Name = "Fertilize Plants Once",
+		Callback = function()
+			spawnOneShot(function()
+				Fertilizer.run(false)
+			end)
+		end,
+	})
+
+	PlotTab:AddToggle({
+		Name = "Auto Fertilize Plants",
+		Default = State.AutoFertilizePlants,
+		Callback = function(value)
+			State.AutoFertilizePlants = value
+			saveConfig()
+			consolePrint("[TOGGLE] Auto Fertilize Plants:", value)
 		end,
 	})
 
 	PlotTab:AddSection({
-		Name = "Plant Removal",
+		Name = "Cleanup",
 	})
 
 	PlotTab:AddButton({
@@ -4131,20 +4717,6 @@ local function buildUI()
 		end,
 	})
 
-	EventTab:AddSection({
-		Name = "Queen Bee",
-	})
-
-	EventTab:AddToggle({
-		Name = "Auto Collect Honeycomb",
-		Default = State.AutoQueenBeeHoneycomb,
-		Callback = function(value)
-			State.AutoQueenBeeHoneycomb = value
-			saveConfig()
-			consolePrint("[TOGGLE] Auto QueenBee Honeycomb:", value)
-		end,
-	})
-
 	--// AUTO BUY TAB
 
 	AutoBuyTab:AddSection({
@@ -4168,19 +4740,6 @@ local function buildUI()
 		end,
 	})
 
-	AutoBuyTab:AddSlider({
-		Name = "Gear Buy Loop Delay",
-		Min = 1,
-		Max = 120,
-		Default = State.GearDelay,
-		Increment = 1,
-		ValueName = "sec",
-		Callback = function(value)
-			State.GearDelay = value
-			saveConfig()
-		end,
-	})
-
 	AutoBuyTab:AddSection({
 		Name = "Auto Sell",
 	})
@@ -4192,19 +4751,6 @@ local function buildUI()
 			State.AutoSell = value
 			saveConfig()
 			consolePrint("[TOGGLE] Auto Sell:", value)
-		end,
-	})
-
-	AutoBuyTab:AddSlider({
-		Name = "Sell Loop Delay",
-		Min = 1,
-		Max = 120,
-		Default = State.SellDelay,
-		Increment = 1,
-		ValueName = "sec",
-		Callback = function(value)
-			State.SellDelay = value
-			saveConfig()
 		end,
 	})
 
@@ -4259,6 +4805,140 @@ local function buildUI()
 			State.AntiAFK = value
 			saveConfig()
 			consolePrint("[TOGGLE] Anti AFK:", value)
+		end,
+	})
+
+	SettingsTab:AddSection({
+		Name = "Loop Delays",
+	})
+
+	SettingsTab:AddSlider({
+		Name = "Seed Roll Delay",
+		Min = 0.5,
+		Max = 120,
+		Default = State.RollDelay,
+		Increment = 0.25,
+		ValueName = "sec",
+		Callback = function(value)
+			State.RollDelay = value
+			saveConfig()
+		end,
+	})
+
+	SettingsTab:AddSlider({
+		Name = "Gear Buy Delay",
+		Min = 1,
+		Max = 120,
+		Default = State.GearDelay,
+		Increment = 1,
+		ValueName = "sec",
+		Callback = function(value)
+			State.GearDelay = value
+			saveConfig()
+		end,
+	})
+
+	SettingsTab:AddSlider({
+		Name = "Egg Buy Delay",
+		Min = 1,
+		Max = 120,
+		Default = State.EggDelay,
+		Increment = 1,
+		ValueName = "sec",
+		Callback = function(value)
+			State.EggDelay = value
+			saveConfig()
+		end,
+	})
+
+	SettingsTab:AddSlider({
+		Name = "Sell Delay",
+		Min = 1,
+		Max = 120,
+		Default = State.SellDelay,
+		Increment = 1,
+		ValueName = "sec",
+		Callback = function(value)
+			State.SellDelay = value
+			saveConfig()
+		end,
+	})
+
+	SettingsTab:AddSlider({
+		Name = "Compost Delay",
+		Min = 0.1,
+		Max = 5,
+		Default = State.CompostDelay,
+		Increment = 0.1,
+		ValueName = "sec",
+		Callback = function(value)
+			State.CompostDelay = value
+			saveConfig()
+		end,
+	})
+
+	SettingsTab:AddSlider({
+		Name = "Plant Upgrade Delay",
+		Min = 1,
+		Max = 120,
+		Default = State.PlantUpgradeDelay,
+		Increment = 0.5,
+		ValueName = "sec",
+		Callback = function(value)
+			State.PlantUpgradeDelay = value
+			saveConfig()
+		end,
+	})
+
+	SettingsTab:AddSlider({
+		Name = "Floor Upgrade Delay",
+		Min = 0.5,
+		Max = 120,
+		Default = State.PlotUpgradeDelay,
+		Increment = 0.5,
+		ValueName = "sec",
+		Callback = function(value)
+			State.PlotUpgradeDelay = value
+			saveConfig()
+		end,
+	})
+
+	SettingsTab:AddSlider({
+		Name = "Plant Seed Delay",
+		Min = 1,
+		Max = 120,
+		Default = State.PlantSeedDelay,
+		Increment = 1,
+		ValueName = "sec",
+		Callback = function(value)
+			State.PlantSeedDelay = value
+			saveConfig()
+		end,
+	})
+
+	SettingsTab:AddSlider({
+		Name = "Spray Delay",
+		Min = 1,
+		Max = 120,
+		Default = State.SprayDelay,
+		Increment = 1,
+		ValueName = "sec",
+		Callback = function(value)
+			State.SprayDelay = value
+			saveConfig()
+		end,
+	})
+
+	SettingsTab:AddSlider({
+		Name = "Fertilizer Delay",
+		Min = 1,
+		Max = 120,
+		Default = State.FertilizerDelay,
+		Increment = 1,
+		ValueName = "sec",
+		Callback = function(value)
+			State.FertilizerDelay = value
+			saveConfig()
 		end,
 	})
 
@@ -4425,6 +5105,21 @@ local function buildUI()
 
 	spawnManaged(function()
 		while not ENV.Stop do
+			if State.AutoUpgradePlotFloors then
+				local startedAt = os.clock()
+
+				upgradePlotFloorsOnce(true)
+
+				local elapsed = os.clock() - startedAt
+				task.wait(math.max(0, math.max(0.5, State.PlotUpgradeDelay) - elapsed))
+			else
+				task.wait(0.25)
+			end
+		end
+	end)
+
+	spawnManaged(function()
+		while not ENV.Stop do
 			if State.AutoPlantSeeds then
 				plantSeedsOnce(true)
 				task.wait(math.max(1, State.PlantSeedDelay))
@@ -4439,6 +5134,17 @@ local function buildUI()
 			if State.AutoSprayPlants then
 				sprayPlantsOnce(true)
 				task.wait(math.max(1, State.SprayDelay))
+			else
+				task.wait(0.25)
+			end
+		end
+	end)
+
+	spawnManaged(function()
+		while not ENV.Stop do
+			if State.AutoFertilizePlants then
+				Fertilizer.run(true)
+				task.wait(math.max(1, State.FertilizerDelay))
 			else
 				task.wait(0.25)
 			end
@@ -4463,17 +5169,6 @@ local function buildUI()
 
 	spawnManaged(function()
 		while not ENV.Stop do
-			if State.AutoQueenBeeHoneycomb then
-				collectQueenBeeHoneycombsOnce()
-				task.wait(0.5)
-			else
-				task.wait(0.25)
-			end
-		end
-	end)
-
-	spawnManaged(function()
-		while not ENV.Stop do
 			if State.AutoSell then
 				sellCrates()
 				task.wait(math.max(1, State.SellDelay))
@@ -4489,14 +5184,20 @@ local function buildUI()
 	refreshCompostSeedDropdown()
 	refreshPlantSeedDropdown()
 	refreshSprayDropdown()
+	refreshFertilizerDropdown()
 	updateSelectedSeedsLabel()
 	updateSelectedSeedRaritiesLabel()
 	updateSelectedEggRaritiesLabel()
 	updateCompostSeedLabel()
 	updateSelectedPlantSeedLabel()
 	updateSelectedSprayLabel()
+	updateSelectedFertilizerLabel()
 	updateStatsLabels()
-	updatePlantViewerLabel(true)
+	updatePlotUpgradeSummaryLabel()
+
+	if updatePlantViewerLabel then
+		updatePlantViewerLabel(true)
+	end
 end
 
 buildUI()
